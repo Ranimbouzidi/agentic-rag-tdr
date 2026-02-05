@@ -1,7 +1,9 @@
 global:
+#lhne kaada nkoul lprometheus bch kol 5 s yy3ml scrape lmetrics mta3na
   scrape_interval: 5s
-
+#l api en question lhne heya l fastapi mtaa lback mteena eli heya aandha route /metrics
 scrape_configs:
   - job_name: "api"
     static_configs:
       - targets: ["host.docker.internal:8000"]
+#lezm tefhem eli prometheus bidou hosted fi docker donc localhost benesba lih howa docker bidou ki ena hajti bch yjib lmetrics ml matchine mtei nhotlou host.docker.internal:8000
