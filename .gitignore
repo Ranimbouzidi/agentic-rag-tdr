@@ -211,4 +211,5 @@ __pycache__/
 *.pyc
 backend/__pycache__/
 ui/node_modules_
+backend/tmp/
 
