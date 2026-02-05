@@ -207,6 +207,8 @@ marimo/_lsp/
 __marimo__/
 .env
 backend/.venv/
+__pycache__/
+*.pyc
 backend/__pycache__/
-ui/node_modules/
+ui/node_modules_
 
