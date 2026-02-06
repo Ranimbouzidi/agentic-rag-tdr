@@ -6,16 +6,14 @@ from app.services.ingestion_service import ingest_file
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
-
 @router.post("/")
 def ingest(file: UploadFile = File(...)):
     temp_dir = Path("tmp")
     temp_dir.mkdir(exist_ok=True)
-
     file_path = temp_dir / file.filename
 
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    doc_id = ingest_file(file_path)
-    return {"doc_id": doc_id}
+    result = ingest_file(file_path)
+    return result
