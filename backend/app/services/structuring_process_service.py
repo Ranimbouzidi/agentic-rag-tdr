@@ -28,8 +28,20 @@ def structure_document(doc_id: str, extracted_text: str, processed_prefix: str, 
     competences = extract_skills_from_text(normalized)
 
     # 5) Fallback procurement sur texte normalisé + tâches nettoyées
-    sections = procurement_fallback(normalized, sections, taches)
-
+    procurement_markers = [
+    "appel d'offre",
+    "dao",
+    "dossier d'appel d'offres",
+    "offre technique",
+    "offre financière",
+    "soumission",
+    "marché",
+    "lot",
+    "dossier administratif",
+]
+    lower = normalized.lower()
+    if any (m in lower for m in procurement_markers):
+        sections = procurement_fallback(normalized, sections, taches)
     payload = {
         "doc_id": doc_id,
         "metadata": {

@@ -26,12 +26,15 @@ def process_document(doc_id: str) -> dict:
         local_raw = Path("tmp") / doc_id / row["filename"]
         download_file(row["raw_bucket"], row["raw_object_key"], local_raw)
 
-        # 2) Extract content (PDF: Docling + fallback, DOCX: python-docx)
+        # 2) Extract content (smart PDF routing: docling/pymupdf/ocr/hybrid)
         extracted = extract_content(local_raw)
-        if not extracted.text.strip():
-            raise ValueError("Extracted text is empty (maybe scanned PDF needs OCR)")
 
-        # 3) Store extracted outputs in MinIO processed (Phase 4A upgrade)
+        if not extracted.text.strip():
+            if getattr(extracted, "extractor", "") == "failed":
+                raise ValueError("PDF is encrypted/protected or cannot be opened for extraction")
+            raise ValueError("Extracted text is empty (OCR may have failed or PDF is unreadable)")
+
+        # 3) Store extracted outputs in MinIO processed
         processed_bucket = row["processed_bucket"]
         processed_prefix = row["processed_prefix"]
 
@@ -55,4 +58,5 @@ def process_document(doc_id: str) -> dict:
         "status": "extracted",
         "text_object_key": txt_key,
         "markdown_object_key": md_key,
+        "extractor": getattr(extracted, "extractor", None),
     }

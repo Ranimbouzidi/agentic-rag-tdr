@@ -4,7 +4,12 @@ import os
 
 class Settings(BaseSettings):
     EXTRACTOR_BACKEND: str = os.getenv("EXTRACTOR_BACKEND", "docling")
-    EXTRACTOR_FALLBACK: str = os.getenv("EXTRACTOR_FALLBACK", "pymupdf")  
+    EXTRACTOR_FALLBACK: str = os.getenv("EXTRACTOR_FALLBACK", "pymupdf") 
+    OCR_BACKEND: str = os.getenv("OCR_BACKEND", "rapidocr")  # rapidocr | none (future: tesseract | azure)
+    OCR_MIN_CHARS: int = int(os.getenv("OCR_MIN_CHARS", "400"))
+    OCR_MAX_PAGES: int = int(os.getenv("OCR_MAX_PAGES", "50"))
+    OCR_PAGE_TEXT_THRESHOLD: int = int(os.getenv("OCR_PAGE_TEXT_THRESHOLD", "40"))
+
     
     
     # API
