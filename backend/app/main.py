@@ -5,9 +5,13 @@ from qdrant_client import QdrantClient
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from app.core.settings import settings
 from app.api.ingest import router as ingest_router
+from app.api.process import router as process_router
+from app.api.structure import router as structure_router
 
 app = FastAPI(title="Agentic RAG TdR API", version="0.1.0")
 app.include_router(ingest_router)
+app.include_router(process_router)
+app.include_router(structure_router)
 
 from app.services.db_service import init_db
 
@@ -40,7 +44,7 @@ def ready():
 
     # Ollama
     try:
-        r = requests.get(f"{settings.ollama_base_url}/api/tags", timeout=3)
+        r = requests.get(f"{settings.ollama_base_url}/api/tags", timeout=5)
         checks["ollama"] = "ok" if r.status_code == 200 else f"status {r.status_code}"
     except Exception as e:
         checks["ollama"] = str(e)

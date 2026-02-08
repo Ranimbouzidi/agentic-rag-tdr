@@ -1,7 +1,12 @@
 from pydantic_settings import BaseSettings
+import os
 
 
 class Settings(BaseSettings):
+    EXTRACTOR_BACKEND: str = os.getenv("EXTRACTOR_BACKEND", "docling")
+    EXTRACTOR_FALLBACK: str = os.getenv("EXTRACTOR_FALLBACK", "pymupdf")  
+    
+    
     # API
     api_port: int = 8000
 
@@ -20,6 +25,8 @@ class Settings(BaseSettings):
     minio_secret_key: str
     minio_bucket_raw: str
     minio_bucket_processed: str
+
+    
 
     # Database
     database_url: str
