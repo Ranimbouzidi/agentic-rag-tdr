@@ -16,6 +16,8 @@ from app.services.structuring_service import (
 )
 
 from app.services.structuring_router import route_structuring
+from app.services.metadata_service import extract_metadata
+
 
 
 PROCUREMENT_MARKERS = [
@@ -119,17 +121,20 @@ def structure_document(
             extracted_markdown=extracted_markdown,
         )
 
+    metadata = extract_metadata(normalized)
+
+
     # 3) Payload stable
     payload = {
         "doc_id": doc_id,
         "doc_type": result.get("doc_type", doc_type),
         "metadata": {
-            "langue": None,
-            "domaine": None,
-            "bailleur": None,
-            "pays": None,
-            "region": None,
-            "dates": {"publication": None, "deadline": None},
+            "langue": metadata.get("langue"),
+            "domaine": metadata.get("domaine"),
+            "bailleur": metadata.get("bailleur"),
+            "pays": metadata.get("pays"),
+            "region": metadata.get("region"),
+            "dates": metadata.get("dates", {"publication": None, "deadline": None}),
         },
         "sections": {
             "contexte": (result.get("sections") or {}).get("contexte", ""),
