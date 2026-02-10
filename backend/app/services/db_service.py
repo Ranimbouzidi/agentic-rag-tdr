@@ -14,14 +14,16 @@ documents = sa.Table(
     sa.Column("filename", sa.String, nullable=False),
     sa.Column("status", sa.String, nullable=False, index=True),
 
-    # pointers storage (cloud-ready)
+    # ✅ doc_type (métier) : tdr | ami | other | unknown
+    sa.Column("doc_type", sa.String(16), nullable=False, server_default="unknown"),
+
+    # pointers storage
     sa.Column("raw_bucket", sa.String, nullable=False),
     sa.Column("raw_object_key", sa.String, nullable=False),
     sa.Column("processed_bucket", sa.String, nullable=False),
     sa.Column("processed_prefix", sa.String, nullable=False),
 
-    # champs "curated" (remplis en phase 4)
-    sa.Column("doc_type", sa.String, nullable=True),
+    # champs "curated"
     sa.Column("language", sa.String, nullable=True),
     sa.Column("title", sa.String, nullable=True),
     sa.Column("bailleur", sa.String, nullable=True),
@@ -34,6 +36,7 @@ documents = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now(), nullable=False),
     sa.Column("error_message", sa.Text, nullable=True),
 )
+
 
 def init_db():
     metadata.create_all(engine)

@@ -241,7 +241,7 @@ def extract_pdf_hybrid(pdf_path: Path, low_text_threshold: int = 40, max_pages: 
 
 # ---------- Router ----------
 def extract_pdf_smart(pdf_path: Path) -> ExtractedContent:
-    # paramètres V1 (on pourra mettre en settings après)
+    # paramètres V1 (tu les as déjà dans settings)
     MIN_CHARS_TOTAL = settings.OCR_MIN_CHARS
     OCR_MAX_PAGES = settings.OCR_MAX_PAGES
     LOW_TEXT_PAGE_THRESHOLD = settings.OCR_PAGE_TEXT_THRESHOLD
@@ -249,35 +249,55 @@ def extract_pdf_smart(pdf_path: Path) -> ExtractedContent:
     stats = classify_pdf(pdf_path, low_text_threshold=LOW_TEXT_PAGE_THRESHOLD)
 
     if stats.kind == "encrypted_or_failed":
-        # on garde un message clair (process_service gère le status)
         return ExtractedContent(markdown=None, text="", extractor="failed")
 
-    if stats.kind == "native_text":
-        # Docling en priorité, fallback PyMuPDF si docling plante
-        try:
-            extracted = extract_from_pdf_docling(pdf_path)
-        except Exception:
-            extracted = extract_from_pdf_pymupdf(pdf_path)
+    # ✅ 1) DOC-LING FIRST (pour TOUS les cas)
+    extracted: ExtractedContent
+    try:
+        extracted = extract_from_pdf_docling(pdf_path)
+    except Exception:
+        # ✅ 2) Fallback PyMuPDF si docling plante
+        extracted = extract_from_pdf_pymupdf(pdf_path)
 
-        # Si malgré tout le texte est trop court, OCR whole-PDF
-        if len(extracted.text.strip()) < MIN_CHARS_TOTAL:
+    # ✅ 3) Si le texte est “pauvre” => OCR en dernier recours
+    # (surtout utile pour scanned/mixed, mais on le fait de manière générale)
+    if len(extracted.text.strip()) < MIN_CHARS_TOTAL:
+        # Cas scanned => OCR global
+        if stats.kind == "scanned":
             ocr_text = ocr_pdf_whole_rapidocr(pdf_path, max_pages=OCR_MAX_PAGES)
             if len(ocr_text.strip()) >= 50:
-                return ExtractedContent(markdown=extracted.markdown, text=ocr_text, extractor="ocr")
-        return extracted
+                return ExtractedContent(
+                    markdown=extracted.markdown,  # garde le md docling si dispo
+                    text=ocr_text,
+                    extractor="ocr",
+                )
 
-    if stats.kind == "scanned":
-        # OCR direct
-        ocr_text = ocr_pdf_whole_rapidocr(pdf_path, max_pages=OCR_MAX_PAGES)
-        return ExtractedContent(markdown=None, text=ocr_text, extractor="ocr")
+        # Cas mixed => hybrid (texte natif quand dispo + OCR pages faibles)
+        elif stats.kind == "mixed":
+            hybrid = extract_pdf_hybrid(
+                pdf_path,
+                low_text_threshold=LOW_TEXT_PAGE_THRESHOLD,
+                max_pages=OCR_MAX_PAGES
+            )
+            if len(hybrid.text.strip()) >= 50:
+                return hybrid
 
-    # mixed
-    extracted = extract_pdf_hybrid(pdf_path, low_text_threshold=LOW_TEXT_PAGE_THRESHOLD, max_pages=OCR_MAX_PAGES)
-    # si hybride trop pauvre, OCR global
-    if len(extracted.text.strip()) < MIN_CHARS_TOTAL:
-        ocr_text = ocr_pdf_whole_rapidocr(pdf_path, max_pages=OCR_MAX_PAGES)
-        if len(ocr_text.strip()) >= 50:
-            return ExtractedContent(markdown=None, text=ocr_text, extractor="ocr")
+            # si hybrid encore trop pauvre => OCR global
+            ocr_text = ocr_pdf_whole_rapidocr(pdf_path, max_pages=OCR_MAX_PAGES)
+            if len(ocr_text.strip()) >= 50:
+                return ExtractedContent(markdown=None, text=ocr_text, extractor="ocr")
+
+        # Cas native_text mais docling/pymupdf ont renvoyé trop peu => OCR global (rare mais safe)
+        else:
+            ocr_text = ocr_pdf_whole_rapidocr(pdf_path, max_pages=OCR_MAX_PAGES)
+            if len(ocr_text.strip()) >= 50:
+                return ExtractedContent(
+                    markdown=extracted.markdown,
+                    text=ocr_text,
+                    extractor="ocr",
+                )
+
+    # ✅ Sinon on retourne l’extraction docling/pymupdf
     return extracted
 
 

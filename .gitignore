@@ -212,4 +212,14 @@ __pycache__/
 backend/__pycache__/
 ui/node_modules_
 backend/tmp/
+# --- fichiers de test locaux ---
+1.pdf
+test_docling.ipynb
+
+# PDFs de test (sécurité)
+*.pdf
+
+# Jupyter
+.ipynb_checkpoints/
+
 

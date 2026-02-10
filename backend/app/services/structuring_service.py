@@ -1,5 +1,5 @@
 import re
-from typing import Dict, List, Tuple ,Optional
+from typing import Dict, List, Tuple ,Optional,Any
 
 SKILL_KEYWORDS = [
     "ohada",
@@ -437,3 +437,147 @@ __all__ = [
     "clean_and_dedup_tasks",
 ]
 
+def extract_markdown_tables(md: str) -> list[dict]:
+    """
+    Parse markdown tables:
+    | H1 | H2 |
+    |----|----|
+    | v1 | v2 |
+    """
+    tables: list[dict] = []
+    if not md:
+        return tables
+
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines) - 2:
+        header = lines[i].strip()
+        sep = lines[i + 1].strip()
+
+        is_table_header = ("|" in header) and ("|" in sep) and bool(re.search(r"-{3,}", sep))
+        if not is_table_header:
+            i += 1
+            continue
+
+        headers = [h.strip() for h in header.split("|") if h.strip()]
+        i += 2
+
+        rows = []
+        while i < len(lines):
+            row_line = lines[i].strip()
+            if "|" not in row_line:
+                break
+            cells = [c.strip() for c in row_line.split("|") if c.strip()]
+            if headers and len(cells) == len(headers):
+                rows.append(dict(zip(headers, cells)))
+            i += 1
+
+        if headers and rows:
+            tables.append({"headers": headers, "rows": rows})
+
+    return tables
+
+
+def _norm_header(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[’'`]", "'", s)
+    s = re.sub(r"[^a-z0-9à-ÿ]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _table_signature(headers: list[str]) -> str:
+    return " ".join(_norm_header(h) for h in headers)
+
+
+def _table_to_bullets(rows: list[dict], max_items: int = 12) -> str:
+    out = []
+    for r in rows[:max_items]:
+        parts = []
+        for k, v in r.items():
+            v = (v or "").strip()
+            if not v:
+                continue
+            kk = (k or "").strip()
+            parts.append(f"{kk}: {v}")
+        if parts:
+            out.append("- " + " | ".join(parts))
+    return "\n".join(out).strip()
+
+
+def _append_section(sections: Dict[str, str], key: str, title: str, bullets: str, max_chars: int = 4000) -> None:
+    """
+    Ajoute du contenu sans écraser. Limite la taille.
+    """
+    if not bullets:
+        return
+    chunk = f"{title}\n{bullets}".strip()
+
+    current = (sections.get(key) or "").strip()
+    if not current:
+        sections[key] = chunk[:max_chars]
+        return
+
+    # éviter doublons (simple)
+    if bullets in current:
+        return
+
+    merged = (current + "\n\n" + chunk).strip()
+    sections[key] = merged[:max_chars]
+
+
+def enrich_sections_from_markdown_tables(sections: Dict[str, str], markdown: str) -> Dict[str, str]:
+    """
+    TABLE-FIRST enrich:
+    - livrables (incl. planning)
+    - profil
+    - taches (on enrichit 'mission' ou 'taches' selon ton schéma -> ici on enrichit mission via table, ET on renvoie aussi une clé 'taches_table' si tu veux)
+      Comme ton schéma final a déjà 'taches' (liste) extraite ailleurs, on enrichit plutôt la SECTION 'mission' avec le tableau des activités.
+    """
+    if not markdown or not markdown.strip():
+        return sections
+
+    tables = extract_markdown_tables(markdown)
+    if not tables:
+        return sections
+
+    # Keywords headers -> catégorie
+    LIVRABLE_KEYS = ["livrable", "deliverable", "output", "rapport", "report", "document", "remise"]
+    PLANNING_KEYS = ["planning", "calendrier", "timeline", "date", "délai", "delai", "durée", "duree", "jours", "mois"]
+    PROFIL_KEYS = ["profil", "profile", "qualification", "qualifications", "expérience", "experience", "diplôme", "diplome", "rôle", "role", "poste", "position"]
+    TASK_KEYS = ["tâche", "tache", "task", "activité", "activite", "activity", "responsabilité", "responsabilite", "description", "scope"]
+
+    for t in tables:
+        headers = t.get("headers", [])
+        rows = t.get("rows", [])
+        if not headers or not rows:
+            continue
+
+        sig = _table_signature(headers)
+
+        # Classif table (peut matcher plusieurs)
+        is_livrables = any(k in sig for k in LIVRABLE_KEYS)
+        is_planning = any(k in sig for k in PLANNING_KEYS)
+        is_profil = any(k in sig for k in PROFIL_KEYS)
+        is_tasks = any(k in sig for k in TASK_KEYS)
+
+        bullets = _table_to_bullets(rows)
+
+        # 1) LIVRABLES / PLANNING -> sections["livrables"]
+        if is_livrables:
+            _append_section(sections, "livrables", "Livrables (extraits de tableaux) :", bullets)
+            continue  # souvent suffisant
+
+        if is_planning:
+            _append_section(sections, "livrables", "Planning (extraits de tableaux) :", bullets)
+            # pas continue: une table planning peut aussi contenir des livrables -> mais ok
+
+        # 2) PROFIL -> sections["profil"]
+        if is_profil:
+            _append_section(sections, "profil", "Profil / Qualifications (extraits de tableaux) :", bullets)
+
+        # 3) TACHES/ACTIVITES -> enrichir "mission"
+        # Car ta liste "taches" est déjà calculée (extract_tasks). Ici, on renforce la section mission.
+        if is_tasks:
+            _append_section(sections, "mission", "Activités / Tâches (extraits de tableaux) :", bullets)
+
+    return sections

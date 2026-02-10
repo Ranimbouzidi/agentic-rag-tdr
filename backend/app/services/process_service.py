@@ -4,6 +4,7 @@ import sqlalchemy as sa
 from app.services.db_service import engine, documents
 from app.services.minio_service import download_file, upload_text, upload_markdown
 from app.services.extraction_service import extract_content
+from app.services.doc_type_service import detect_doc_type
 
 
 def process_document(doc_id: str) -> dict:
@@ -34,6 +35,9 @@ def process_document(doc_id: str) -> dict:
                 raise ValueError("PDF is encrypted/protected or cannot be opened for extraction")
             raise ValueError("Extracted text is empty (OCR may have failed or PDF is unreadable)")
 
+        # ✅ 2bis) Detect business doc_type (tdr/ami/other)
+        doc_type = detect_doc_type(extracted.text)
+
         # 3) Store extracted outputs in MinIO processed
         processed_bucket = row["processed_bucket"]
         processed_prefix = row["processed_prefix"]
@@ -46,16 +50,20 @@ def process_document(doc_id: str) -> dict:
             md_key = f"{processed_prefix}extracted/extracted.md"
             upload_markdown(processed_bucket, md_key, extracted.markdown)
 
-        # 4) Update DB
+        # 4) Update DB (status + doc_type)
         conn.execute(
             documents.update()
             .where(documents.c.id == doc_id)
-            .values(status="extracted")
+            .values(
+                status="extracted",
+                doc_type=doc_type,
+            )
         )
 
     return {
         "doc_id": doc_id,
         "status": "extracted",
+        "doc_type": doc_type,
         "text_object_key": txt_key,
         "markdown_object_key": md_key,
         "extractor": getattr(extracted, "extractor", None),

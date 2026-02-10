@@ -21,33 +21,42 @@ def structure(doc_id: str):
                 ).where(documents.c.id == doc_id)
             ).mappings().first()
 
-            if not row:
-                raise ValueError("doc_id not found")
+        if not row:
+            raise ValueError("doc_id not found")
 
         processed_bucket = row["processed_bucket"]
         processed_prefix = row["processed_prefix"]
 
-        # 2) Fetch extracted text from MinIO (Phase 4A upgrade)
+        # 2) Read extracted.txt (required)
         txt_key = f"{processed_prefix}extracted/extracted.txt"
         try:
             extracted_text = download_text(processed_bucket, txt_key)
         except Exception as e:
             raise ValueError(
-                f"Cannot read extracted text from MinIO: bucket={processed_bucket}, key={txt_key}. "
-                f"Have you run /process/{doc_id} ? Original error: {e}"
+                f"Cannot read extracted text (missing extracted.txt). "
+                f"bucket={processed_bucket}, key={txt_key}. "
+                f"Run POST /process/{doc_id} first. Original error: {e}"
             )
 
         if not extracted_text.strip():
-            raise ValueError("Extracted text is empty (maybe scanned PDF needs OCR)")
+            raise ValueError("Extracted text is empty (OCR may have failed or PDF unreadable)")
 
-        # 3) (Optional) detect markdown presence (Docling)
+        # 3) Read extracted.md (optional)
         md_key = f"{processed_prefix}extracted/extracted.md"
-        has_markdown = object_exists(processed_bucket, md_key)
+        extracted_markdown = None
 
-        # 4) Structure (Phase 4B unchanged)
+        md_exists = object_exists(processed_bucket, md_key)
+        if md_exists:
+            try:
+                extracted_markdown = download_text(processed_bucket, md_key)
+            except Exception:
+                extracted_markdown = None  # on n'échoue pas pour ça
+
+        # 4) Structure (TXT + optional Markdown tables)
         out_key = structure_document(
             doc_id=doc_id,
             extracted_text=extracted_text,
+            extracted_markdown=extracted_markdown,
             processed_prefix=processed_prefix,
             processed_bucket=processed_bucket,
         )
@@ -58,7 +67,7 @@ def structure(doc_id: str):
             "structured_object_key": out_key,
             "extraction": {
                 "txt_key": txt_key,
-                "md_key": md_key if has_markdown else None,
+                "md_key": md_key if md_exists else None,
             },
         }
 
