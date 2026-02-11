@@ -8,10 +8,15 @@ from app.api.ingest import router as ingest_router
 from app.api.process import router as process_router
 from app.api.structure import router as structure_router
 
+from app.api.index import router as index_router
+
+
+
 app = FastAPI(title="Agentic RAG TdR API", version="0.1.0")
 app.include_router(ingest_router)
 app.include_router(process_router)
 app.include_router(structure_router)
+app.include_router(index_router)
 
 from app.services.db_service import init_db
 

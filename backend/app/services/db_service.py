@@ -35,7 +35,27 @@ documents = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now(), nullable=False),
     sa.Column("error_message", sa.Text, nullable=True),
+
+
+    # Phase 5 - indexing metadata
+    sa.Column("qdrant_collection", sa.String(128), nullable=True),
+    sa.Column("vector_size", sa.Integer, nullable=True),
+    sa.Column("chunk_count", sa.Integer, nullable=True),
+    sa.Column("indexed_at", sa.DateTime(timezone=True), nullable=True),
+
 )
+
+embedding_cache = sa.Table(
+    "embedding_cache",
+    metadata,
+    sa.Column("id", sa.BigInteger, primary_key=True),
+    sa.Column("model", sa.String(64), nullable=False),
+    sa.Column("text_hash", sa.String(40), nullable=False),
+    sa.Column("dim", sa.Integer, nullable=False),
+    sa.Column("embedding", sa.JSON, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+)
+
 
 
 def init_db():
