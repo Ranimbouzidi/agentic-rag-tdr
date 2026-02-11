@@ -1,0 +1,105 @@
+﻿{
+    "mode":  "qdrant",
+    "query":  "SFQC Banque mondiale",
+    "top_k":  5,
+    "filters":  {
+                    "doc_type":  "ami"
+                },
+    "results":  [
+                    {
+                        "score":  0.7572174,
+                        "doc_id":  "5221b7ae-3bb0-45da-8c27-7295f4d1ae8c",
+                        "doc_type":  "ami",
+                        "section":  "competences",
+                        "chunk_index":  13,
+                        "text":  "CompÃ©tences / mots-clÃ©s dÃ©tectÃ©s : banque mondiale, mpr, paie, social",
+                        "metadata":  {
+                                         "langue":  "fr",
+                                         "domaine":  "informatique / si",
+                                         "bailleur":  "banque mondiale",
+                                         "pays":  "tunisie",
+                                         "region":  null,
+                                         "dates":  {
+                                                       "publication":  "2022-02-24",
+                                                       "deadline":  "2022-02-24"
+                                                   }
+                                     }
+                    },
+                    {
+                        "score":  0.7572174,
+                        "doc_id":  "1a299bf2-54bb-42eb-916f-e932a6a59f6d",
+                        "doc_type":  "ami",
+                        "section":  "competences",
+                        "chunk_index":  13,
+                        "text":  "CompÃ©tences / mots-clÃ©s dÃ©tectÃ©s : banque mondiale, mpr, paie, social",
+                        "metadata":  {
+                                         "langue":  "fr",
+                                         "domaine":  "informatique / si",
+                                         "bailleur":  "banque mondiale",
+                                         "pays":  "tunisie",
+                                         "region":  null,
+                                         "dates":  {
+                                                       "publication":  "2022-02-24",
+                                                       "deadline":  "2022-02-24"
+                                                   }
+                                     }
+                    },
+                    {
+                        "score":  0.7572174,
+                        "doc_id":  "8ee06932-de51-4620-b654-c81fe1133d5b",
+                        "doc_type":  "ami",
+                        "section":  "competences",
+                        "chunk_index":  13,
+                        "text":  "CompÃ©tences / mots-clÃ©s dÃ©tectÃ©s : banque mondiale, mpr, paie, social",
+                        "metadata":  {
+                                         "langue":  "fr",
+                                         "domaine":  "informatique / si",
+                                         "bailleur":  "banque mondiale",
+                                         "pays":  "tunisie",
+                                         "region":  null,
+                                         "dates":  {
+                                                       "publication":  "2022-02-24",
+                                                       "deadline":  "2022-02-24"
+                                                   }
+                                     }
+                    },
+                    {
+                        "score":  0.65117645,
+                        "doc_id":  "5221b7ae-3bb0-45da-8c27-7295f4d1ae8c",
+                        "doc_type":  "ami",
+                        "section":  "tache:item",
+                        "chunk_index":  7,
+                        "text":  "[task:f4d6d992e5] Installation et Mise en Service des outils nÃ©cessaires Ã  la mise en place de la plateforme ;",
+                        "metadata":  {
+                                         "langue":  "fr",
+                                         "domaine":  "informatique / si",
+                                         "bailleur":  "banque mondiale",
+                                         "pays":  "tunisie",
+                                         "region":  null,
+                                         "dates":  {
+                                                       "publication":  "2022-02-24",
+                                                       "deadline":  "2022-02-24"
+                                                   }
+                                     }
+                    },
+                    {
+                        "score":  0.65117645,
+                        "doc_id":  "8ee06932-de51-4620-b654-c81fe1133d5b",
+                        "doc_type":  "ami",
+                        "section":  "tache:item",
+                        "chunk_index":  7,
+                        "text":  "[task:f4d6d992e5] Installation et Mise en Service des outils nÃ©cessaires Ã  la mise en place de la plateforme ;",
+                        "metadata":  {
+                                         "langue":  "fr",
+                                         "domaine":  "informatique / si",
+                                         "bailleur":  "banque mondiale",
+                                         "pays":  "tunisie",
+                                         "region":  null,
+                                         "dates":  {
+                                                       "publication":  "2022-02-24",
+                                                       "deadline":  "2022-02-24"
+                                                   }
+                                     }
+                    }
+                ]
+}

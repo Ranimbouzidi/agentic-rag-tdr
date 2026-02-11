@@ -65,7 +65,7 @@ def index_document(doc_id: str) -> Dict[str, Any]:
     points: List[qm.PointStruct] = []
     for c, v in zip(chunks, vectors):
         ns = uuid.UUID(c.doc_id) 
-        point_id = str(uuid.uuid5(ns, f"{c.section}:{c.chunk_index}"))
+        point_id = str(uuid.uuid5(ns, f"{doc_id}:{c.section}:{c.chunk_index}"))
         chunk_id = f"{c.doc_id}:{c.section}:{c.chunk_index}"
         payload = {
             "chunk_id": chunk_id, 

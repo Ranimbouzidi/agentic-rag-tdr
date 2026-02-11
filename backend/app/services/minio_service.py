@@ -69,25 +69,33 @@ def upload_markdown(bucket: str, object_name: str, markdown: str):
     upload_text(bucket, object_name, markdown, content_type="text/markdown; charset=utf-8")
 
 
-def download_text(
-    bucket: str,
-    object_name: str,
-    encoding: str = "utf-8",
-    errors: str = "replace",
-) -> str:
-    """
-    Télécharge un objet texte depuis MinIO et le retourne en string.
-    Ferme/release correctement la connexion.
-    """
+def download_text(bucket: str, object_name: str) -> str:
     client = get_minio_client()
     resp = None
     try:
         resp = client.get_object(bucket, object_name)
-        return resp.read().decode(encoding, errors=errors)
+        raw = resp.read()
+
+        # 1) try utf-8 strict
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+
+        # 2) try windows-1252 (common for FR docs)
+        try:
+            return raw.decode("cp1252")
+        except UnicodeDecodeError:
+            pass
+
+        # 3) last resort
+        return raw.decode("latin-1", errors="replace")
+
     finally:
         if resp is not None:
             resp.close()
             resp.release_conn()
+
 
 
 def object_exists(bucket: str, object_name: str) -> bool:

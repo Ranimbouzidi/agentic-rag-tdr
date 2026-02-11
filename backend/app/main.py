@@ -3,38 +3,56 @@ import requests
 import sqlalchemy as sa
 from qdrant_client import QdrantClient
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from contextlib import asynccontextmanager
+
 from app.core.settings import settings
+from app.services.db_service import init_db
+
 from app.api.ingest import router as ingest_router
 from app.api.process import router as process_router
 from app.api.structure import router as structure_router
-
 from app.api.index import router as index_router
+from app.api.search import router as search_router
+from app.api.docs import router as docs_router
+from app.api.rag import router as rag_router
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    init_db()
+    yield
+    # Shutdown (optional)
 
-app = FastAPI(title="Agentic RAG TdR API", version="0.1.0")
+
+app = FastAPI(
+    title="Agentic RAG TdR API",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# ✅ routers (NE PAS faire avant de recréer app)
 app.include_router(ingest_router)
 app.include_router(process_router)
 app.include_router(structure_router)
 app.include_router(index_router)
+app.include_router(search_router)
+app.include_router(docs_router)
+app.include_router(rag_router)
 
-from app.services.db_service import init_db
 
-init_db()
-
-#hedhy l endpoint mtei loula c est pour verifier la disponibilité de l api 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-#hedhy l endpoint mtei li bch yakra biha prometheus l metrics mta3na w yjibha b format eli yefhamha prometheus w hneya generate_latest() mta3 prometheus client library li tgeneri l metrics b format eli yefhamha prometheus w CONTENT_TYPE_LATEST houwa l content type eli yest3mlou prometheus bch y3rfou format mta3 l data eli jeyha
+
 @app.get("/metrics")
 def metrics():
     data = generate_latest()
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
-#hedhy l endpoint mtei pour verifier la disponibilite les services eli hatithom fil docker compose lkol o mnhom ollama zeda 
+
 @app.get("/ready")
 def ready():
     checks = {}

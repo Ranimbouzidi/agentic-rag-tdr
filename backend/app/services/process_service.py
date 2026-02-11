@@ -30,6 +30,11 @@ def process_document(doc_id: str) -> dict:
         # 2) Extract content (smart PDF routing: docling/pymupdf/ocr/hybrid)
         extracted = extract_content(local_raw)
 
+        from app.services.extraction_service import fix_mojibake
+        extracted.text = fix_mojibake(extracted.text)
+        if extracted.markdown:
+          extracted.markdown = fix_mojibake(extracted.markdown)
+
         if not extracted.text.strip():
             if getattr(extracted, "extractor", "") == "failed":
                 raise ValueError("PDF is encrypted/protected or cannot be opened for extraction")

@@ -27,6 +27,27 @@ def _normalize_text(s: Optional[str]) -> str:
         s = s.replace("\n\n\n", "\n\n")
     return s.strip()
 
+def fix_mojibake(s: str) -> str:
+    """
+    Répare le cas classique: texte UTF-8 décodé par erreur en latin-1/cp1252,
+    ex: "CompÃ©tences" -> "Compétences".
+    Heuristique: on ne tente la réparation que si marqueurs présents.
+    """
+    if not s:
+        return s
+    if ("Ã" not in s) and ("Â" not in s):
+        return s
+
+    try:
+        repaired = s.encode("latin-1", errors="ignore").decode("utf-8", errors="ignore")
+        # garde seulement si ça améliore visiblement
+        if repaired and (repaired.count("Ã") + repaired.count("Â")) < (s.count("Ã") + s.count("Â")):
+            return repaired
+    except Exception:
+        pass
+    return s
+
+
 
 def _join_pages(pages: list[str]) -> str:
     return _normalize_text("\n\n".join(pages))
