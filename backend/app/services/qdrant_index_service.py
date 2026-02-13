@@ -1,4 +1,3 @@
-# backend/app/services/qdrant_index_service.py
 from __future__ import annotations
 
 from typing import List
@@ -50,3 +49,25 @@ def upsert_points(points: List[qm.PointStruct]) -> None:
         return
     qc = get_qdrant()
     qc.upsert(collection_name=settings.qdrant_collection, points=points)
+
+
+def delete_points_by_doc_id(doc_id: str) -> None:
+    """
+    Supprime tous les points Qdrant dont payload.doc_id == doc_id.
+    À faire avant ré-indexation pour éviter des chunks "fantômes".
+    """
+    qc = get_qdrant()
+    qc.delete(
+        collection_name=settings.qdrant_collection,
+        points_selector=qm.FilterSelector(
+            filter=qm.Filter(
+                must=[
+                    qm.FieldCondition(
+                        key="doc_id",
+                        match=qm.MatchValue(value=doc_id),
+                    )
+                ]
+            )
+        ),
+        wait=True,
+    )

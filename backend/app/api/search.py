@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 
 from app.services.search_service import search
+from app.services.filters_utils import normalize_filters
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -45,10 +46,12 @@ class SearchResponse(BaseModel):
     note: Optional[str] = None
     qdrant_error: Optional[str] = None
 
-
 @router.post("/", response_model=SearchResponse)
 def search_api(req: SearchRequest):
     try:
-        return search(query=req.query, top_k=req.top_k, filters=req.filters or {})
+        filters = normalize_filters(req.filters)
+        return search(query=req.query, top_k=req.top_k, filters=filters)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))    
+
+

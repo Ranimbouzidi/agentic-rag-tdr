@@ -5,12 +5,14 @@ import uuid
 import httpx
 
 from qdrant_client import QdrantClient
-from qdrant_client.http import models as qm
 
 from app.core.settings import settings
 from app.services.search_service import search
+import re
 
-
+# -------------------------
+# Qdrant helpers
+# -------------------------
 def _get_qdrant() -> QdrantClient:
     return QdrantClient(url=settings.qdrant_url)
 
@@ -25,14 +27,18 @@ def _point_id(doc_id: str, section: str, chunk_index: int) -> str:
     return str(uuid.uuid5(ns, f"{doc_id}:{section}:{chunk_index}"))
 
 
-def _fetch_chunks_by_ids(snippet_refs: List[Tuple[str, str, int]]) -> Dict[Tuple[str, str, int], Dict[str, Any]]:
+def _fetch_chunks_by_ids(
+    snippet_refs: List[Tuple[str, str, int]]
+) -> Dict[Tuple[str, str, int], Dict[str, Any]]:
     """
-    Retrieve ONLY the needed chunks from Qdrant using point_ids (fast).
+    Retrieve ONLY the needed chunks from Qdrant using point_ids.
     key = (doc_id, section, chunk_index) -> payload
     """
+    if not snippet_refs:
+        return {}
+
     qc = _get_qdrant()
 
-    # build retrieve list
     ids: List[str] = []
     key_by_id: Dict[str, Tuple[str, str, int]] = {}
 
@@ -65,124 +71,286 @@ def _fetch_chunks_by_ids(snippet_refs: List[Tuple[str, str, int]]) -> Dict[Tuple
     return out
 
 
+def _neighbor_refs(doc_id: str, section: str, center_idx: int, radius: int = 2) -> List[Tuple[str, str, int]]:
+    refs: List[Tuple[str, str, int]] = []
+    for d in range(1, radius + 1):
+        refs.append((doc_id, section, center_idx - d))
+        refs.append((doc_id, section, center_idx + d))
+    return [(a, b, c) for (a, b, c) in refs if isinstance(c, int) and c >= 0]
+
+
+# -------------------------
+# Context builder (generic)
+# -------------------------
+
 def _build_context_from_grouped_results(
     grouped_docs: List[Dict[str, Any]],
-    query: str
+    query: str,
 ) -> Tuple[str, List[Dict[str, Any]]]:
 
     max_docs = int(getattr(settings, "rag_top_docs", 1))
-    per_doc = int(getattr(settings, "rag_snippets_per_doc", 3))
-    max_chars = int(getattr(settings, "rag_max_context_chars", 4000))
+    per_doc = int(getattr(settings, "rag_snippets_per_doc", 2))
+    max_chars = int(getattr(settings, "rag_max_context_chars", 1500))
     max_chunk_chars = int(getattr(settings, "rag_max_chunk_chars", 2500))
+    expand_radius = int(getattr(settings, "rag_expand_radius", 1))
 
     selected_docs = (grouped_docs or [])[:max_docs]
 
-    # Collect snippet refs (prioritize mission first)
-    wanted: List[Tuple[str, str, int]] = []
+    wanted: List[Tuple[str, str, int]] = []  # qdrant ids to retrieve
+    base_items: List[Dict[str, Any]] = []    # hits coming from search (with scores)
 
+    # -------------------------
+    # 1) Collect top snippets from search()
+    # -------------------------
     for d in selected_docs:
         doc_id = d.get("doc_id")
         if not doc_id:
             continue
 
+        doc_type = d.get("doc_type") or "unknown"
+        doc_meta = d.get("metadata") or {}
         snippets_all = list(d.get("snippets") or [])
 
-        # ✅ priorité mission
-        snippets_all.sort(
-            key=lambda x: 0 if x.get("section") in ("mission", "services", "taches") else 1
-        )
+        snippets_all.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+        top_snips = snippets_all[:per_doc]
 
-        snippets = snippets_all[:per_doc]
-
-        for s in snippets:
+        for s in top_snips:
             section = s.get("section")
             chunk_index = s.get("chunk_index")
+            if not section:
+                continue
 
-            if section and isinstance(chunk_index, int):
+            score = s.get("score")  # keep search score
+
+            if isinstance(chunk_index, int):
                 wanted.append((doc_id, section, chunk_index))
+                base_items.append(
+                    {
+                        "doc_id": doc_id,
+                        "doc_type": doc_type,
+                        "metadata": doc_meta,
+                        "section": section,
+                        "chunk_index": chunk_index,
+                        "score": score,
+                        "snippet": s.get("snippet"),
+                    }
+                )
+            else:
+                # fallback lexical: no chunk_index => only snippet text available
+                base_items.append(
+                    {
+                        "doc_id": doc_id,
+                        "doc_type": doc_type,
+                        "metadata": doc_meta,
+                        "section": section,
+                        "chunk_index": None,
+                        "score": score,
+                        "snippet": s.get("snippet"),
+                    }
+                )
 
+    # -------------------------
+    # 2) Expand around best hit (neighbors)
+    #    => neighbors will have score = None in sources (your choice ✅)
+    # -------------------------
+    best = None
+    best_score = -1.0
+
+    for it in base_items:
+        if it.get("chunk_index") is None:
+            continue
+        sc = float(it.get("score") or 0.0)
+        if sc > best_score:
+            best = it
+            best_score = sc
+
+    if best:
+        sec = str(best.get("section") or "")
+        # avoid expanding around tables and atomic task items
+        if not sec.startswith("table:") and sec != "tache:item":
+            wanted.extend(
+                _neighbor_refs(
+                    best["doc_id"],
+                    sec,
+                    int(best["chunk_index"]),
+                    radius=expand_radius,
+                )
+            )
+
+    # de-dup wanted (only qdrant ids)
+    wanted = list(dict.fromkeys(wanted))
+
+    # retrieve only needed qdrant chunks
     chunks_payload = _fetch_chunks_by_ids(wanted)
 
+    # -------------------------
+    # 3) Build ordered list:
+    #    - first: base hits (scored)
+    #    - then: neighbors (score None)
+    # -------------------------
+    base_keys: List[Tuple[str, str, int]] = []
+    base_score_by_key: Dict[Tuple[str, str, int], Optional[float]] = {}
+
+    for it in base_items:
+        if isinstance(it.get("chunk_index"), int):
+            k = (it["doc_id"], it["section"], int(it["chunk_index"]))
+            base_keys.append(k)
+            base_score_by_key[k] = it.get("score")
+
+    # unique while keeping order
+    seen = set()
+    base_keys_unique: List[Tuple[str, str, int]] = []
+    for k in base_keys:
+        if k not in seen:
+            base_keys_unique.append(k)
+            seen.add(k)
+
+    ordered_qdrant_keys: List[Tuple[str, str, int]] = []
+    seen2 = set()
+    for k in base_keys_unique:
+        if k not in seen2:
+            ordered_qdrant_keys.append(k)
+            seen2.add(k)
+    for k in wanted:
+        if k not in seen2:
+            ordered_qdrant_keys.append(k)
+            seen2.add(k)
+
+    # -------------------------
+    # 4) Emit context + sources
+    # -------------------------
     context_parts: List[str] = []
     sources: List[Dict[str, Any]] = []
     total = 0
 
-    for rank, d in enumerate(selected_docs, start=1):
-        doc_id = d.get("doc_id")
-        if not doc_id:
+    for (doc_id, section, chunk_index) in ordered_qdrant_keys:
+        payload = chunks_payload.get((doc_id, section, chunk_index)) or {}
+        full_text = (payload.get("text") or "").strip()
+
+        # junk guards
+        if full_text and re.fullmatch(r"[\s\|\-:–—_]+", full_text):
+            continue
+        if full_text and len(re.findall(r"[A-Za-zÀ-ÿ0-9]", full_text)) < 12 and not re.search(r"[A-Za-zÀ-ÿ]{4,}", full_text):
             continue
 
-        doc_meta = d.get("metadata") or {}
-        doc_type = d.get("doc_type")
+        if not full_text:
+            # fallback to snippet if this key was a base hit
+            sn = next(
+                (
+                    x for x in base_items
+                    if x.get("doc_id") == doc_id
+                    and x.get("section") == section
+                    and x.get("chunk_index") == chunk_index
+                ),
+                None,
+            )
+            full_text = (sn.get("snippet") if sn else "") or ""
+            full_text = full_text.strip()
 
-        snippets_all = list(d.get("snippets") or [])
-        snippets_all.sort(
-            key=lambda x: 0 if x.get("section") in ("mission", "services", "taches") else 1
+        if not full_text:
+            continue
+
+        if max_chunk_chars and len(full_text) > max_chunk_chars:
+            full_text = full_text[:max_chunk_chars]
+
+        block = (
+            f"{full_text}\n"
+            f"[SOURCE doc_id={doc_id} section={section} chunk_index={chunk_index}]\n"
         )
 
-        snippets = snippets_all[:per_doc]
-
-        for s in snippets:
-            section = s.get("section")
-            chunk_index = s.get("chunk_index")
-
-            full_text = ""
-
-            if section and isinstance(chunk_index, int):
-                payload = chunks_payload.get((doc_id, section, chunk_index)) or {}
-                full_text = (payload.get("text") or "").strip()
-
-            # fallback
-            if not full_text:
-                full_text = (s.get("snippet") or "").strip()
-
-            # ✅ IMPORTANT: ne pas tronquer mission/services/taches
-            if section not in ("mission", "services", "taches"):
-                if max_chunk_chars and len(full_text) > max_chunk_chars:
-                    full_text = full_text[:max_chunk_chars]
-
-            block = (
-                f"{full_text}\n"
-                f"[SOURCE doc={rank} doc_id={doc_id} section={section} chunk_index={chunk_index}]\n"
-            )
-
-            if total + len(block) > max_chars:
-                break
-
-            context_parts.append(block)
-            total += len(block)
-
-            sources.append(
-                {
-                    "doc_id": doc_id,
-                    "doc_type": doc_type,
-                    "section": section,
-                    "chunk_index": chunk_index,
-                    "score": s.get("score"),
-                    "metadata": doc_meta,
-                    "snippet": s.get("snippet"),
-                }
-            )
-
-        if total >= max_chars:
+        if total + len(block) > max_chars:
             break
+
+        context_parts.append(block)
+        total += len(block)
+
+        # ✅ score:
+        # - base hits keep their real score
+        # - neighbors => score None
+        score = base_score_by_key.get((doc_id, section, chunk_index), None)
+        src_score = next(
+            (
+                float(x.get("score"))
+                for x in base_items
+                if x["doc_id"] == doc_id
+                and x["section"] == section
+                and x.get("chunk_index") == chunk_index
+            and x.get("score") is not None
+            ),
+             None,
+        )
+
+        sources.append(
+            {
+                "doc_id": doc_id,
+                "doc_type": payload.get("doc_type"),
+                "section": section,
+                "chunk_index": chunk_index,
+                "score": src_score,  # ✅ neighbors stay None
+                "metadata": payload.get("metadata") or {},
+                "snippet": (payload.get("text") or "")[:400],
+            }
+        )
+
+    # -------------------------
+    # 5) Add fallback-lexical-only sources (chunk_index None)
+    #    (These keep their score from search fallback)
+    # -------------------------
+    # If your search mode is always qdrant now, this will rarely run,
+    # but it keeps compatibility.
+    for it in base_items:
+        if it.get("chunk_index") is not None:
+            continue
+
+        full_text = (it.get("snippet") or "").strip()
+        if not full_text:
+            continue
+
+        if max_chunk_chars and len(full_text) > max_chunk_chars:
+            full_text = full_text[:max_chunk_chars]
+
+        block = (
+            f"{full_text}\n"
+            f"[SOURCE doc_id={it['doc_id']} section={it['section']} chunk_index=None]\n"
+        )
+
+        if total + len(block) > max_chars:
+            break
+
+        context_parts.append(block)
+        total += len(block)
+
+        sources.append(
+            {
+                "doc_id": it["doc_id"],
+                "doc_type": it.get("doc_type"),
+                "section": it.get("section"),
+                "chunk_index": None,
+                "score": it.get("score"),
+                "metadata": it.get("metadata") or {},
+                "snippet": full_text[:400],
+            }
+        )
 
     return "\n---\n".join(context_parts), sources
 
 
 
+
+# -------------------------
+# Ollama call
+# -------------------------
 def _ollama_generate(prompt: str) -> str:
     url = settings.ollama_base_url.rstrip("/") + "/api/generate"
 
-    timeout_s = float(getattr(settings, "llm_timeout_s", 350))
-    num_predict = int(getattr(settings, "llm_num_predict", 1024))
+    timeout_s = float(getattr(settings, "llm_timeout_s", 1800))
+    num_predict = int(getattr(settings, "llm_num_predict", 384))
     temperature = float(getattr(settings, "rag_temperature", 0.2))
 
     payload = {
         "model": settings.llm_model,
         "prompt": prompt,
         "stream": False,
-        # ✅ empêche Ollama de décharger le modèle trop vite (évite “warmup” lent)
         "keep_alive": "10m",
         "options": {
             "temperature": temperature,
@@ -190,17 +358,40 @@ def _ollama_generate(prompt: str) -> str:
         },
     }
 
-    # ✅ timeout explicite (connect/read/write/pool)
-    t = httpx.Timeout(timeout_s, connect=30.0, read=timeout_s, write=30.0, pool=timeout_s)
-    with httpx.Client(timeout=t) as client:
-        r = client.post(url, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        return (data.get("response") or "").strip()
+    timeout = httpx.Timeout(
+        timeout_s,
+        connect=30.0,
+        read=timeout_s,
+        write=30.0,
+        pool=timeout_s,
+    )
 
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return (data.get("response") or "").strip()
 
+    except httpx.ReadTimeout:
+        print("⚠️ Ollama ReadTimeout — returning safe fallback")
+        return "Je ne sais pas."
 
+    except httpx.HTTPStatusError as e:
+        print(f"⚠️ Ollama HTTP error: {e.response.status_code}")
+        return "Je ne sais pas."
 
+    except httpx.RequestError as e:
+        print(f"⚠️ Ollama connection error: {str(e)}")
+        return "Je ne sais pas."
+
+    except Exception as e:
+        print(f"⚠️ Unexpected LLM error: {str(e)}")
+        return "Je ne sais pas."
+
+# -------------------------
+# Public API
+# -------------------------
 def answer(query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     filters = filters or {}
 
@@ -210,18 +401,19 @@ def answer(query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None)
     context, sources = _build_context_from_grouped_results(grouped_docs, query=query)
 
     prompt = (
-    "Tu es un assistant.\n"
-    "Réponds uniquement avec les informations présentes dans le CONTEXTE.\n"
-    "Si la réponse n'est pas dans le CONTEXTE, réponds exactement: Je ne sais pas.\n"
-    "Réponse attendue: une liste complète et concise.\n\n"
-    f"QUESTION:\n{query}\n\n"
-    f"CONTEXTE:\n{context}\n\n"
-    "RÉPONSE:"
-)
-    
+        "Tu es un assistant.\n"
+        "Réponds uniquement avec les informations présentes dans le CONTEXTE.\n"
+        "Si la réponse n'est pas dans le CONTEXTE, réponds exactement: Je ne sais pas.\n"
+        "Réponse attendue: une réponse concise.\n\n"
+        f"QUESTION:\n{query}\n\n"
+        f"CONTEXTE:\n{context}\n\n"
+        "RÉPONSE:"
+    )
+
     print("CTX_CHARS", len(context))
     print("CTX_PREVIEW\n", context[:800])
     print("CTX_END\n", context[-800:])
+
     llm_answer = _ollama_generate(prompt)
 
     return {
@@ -232,6 +424,5 @@ def answer(query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None)
         "search_mode": sr.get("mode"),
         "answer": llm_answer,
         "sources": sources,
-        # debug (facultatif, tu peux enlever si tu veux)
         "context_chars": len(context),
     }

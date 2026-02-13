@@ -263,9 +263,9 @@ def extract_pdf_hybrid(pdf_path: Path, low_text_threshold: int = 40, max_pages: 
 # ---------- Router ----------
 def extract_pdf_smart(pdf_path: Path) -> ExtractedContent:
     # paramètres V1 (tu les as déjà dans settings)
-    MIN_CHARS_TOTAL = settings.OCR_MIN_CHARS
-    OCR_MAX_PAGES = settings.OCR_MAX_PAGES
-    LOW_TEXT_PAGE_THRESHOLD = settings.OCR_PAGE_TEXT_THRESHOLD
+    MIN_CHARS_TOTAL = settings.ocr_min_chars
+    OCR_MAX_PAGES = settings.ocr_max_pages
+    LOW_TEXT_PAGE_THRESHOLD = settings.ocr_page_text_threshold
 
     stats = classify_pdf(pdf_path, low_text_threshold=LOW_TEXT_PAGE_THRESHOLD)
 

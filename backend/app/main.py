@@ -1,9 +1,14 @@
-from fastapi import FastAPI, Response
+# backend/app/main.py
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
 import requests
 import sqlalchemy as sa
+from fastapi import FastAPI, Response
+from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from qdrant_client import QdrantClient
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from contextlib import asynccontextmanager
 
 from app.core.settings import settings
 from app.services.db_service import init_db
@@ -31,7 +36,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ✅ routers (NE PAS faire avant de recréer app)
+# ✅ CORS (pour le front Vite / lovable)
+# - allow_methods=["*"] est CRITIQUE pour que OPTIONS (preflight) marche
+# - si tu déploies plus tard, tu ajouteras ton domaine ici
+cors_origins = [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ✅ routers
 app.include_router(ingest_router)
 app.include_router(process_router)
 app.include_router(structure_router)
@@ -39,7 +65,6 @@ app.include_router(index_router)
 app.include_router(search_router)
 app.include_router(docs_router)
 app.include_router(rag_router)
-
 
 
 @app.get("/health")

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import sqlalchemy as sa
 from qdrant_client import QdrantClient
@@ -169,25 +169,40 @@ def _get_qdrant() -> QdrantClient:
 
 
 def _build_qdrant_filter(filters: Dict[str, Any]) -> Optional[qm.Filter]:
-    must: List[qm.FieldCondition] = []
+    must: List[qm.Condition] = []
+    should: List[qm.Condition] = []
 
     def add_kw(field: str, value: Any):
         if value is None or value == "":
             return
         must.append(qm.FieldCondition(key=field, match=qm.MatchValue(value=value)))
 
-    # payload fields
+    # doc_type exact
     add_kw("doc_type", filters.get("doc_type"))
-    add_kw("section", filters.get("section"))
 
-    # nested metadata.*
+    # section variants
+    section = (filters.get("section") or "").strip()
+    if section:
+        should.append(qm.FieldCondition(key="section", match=qm.MatchValue(value=section)))
+        should.append(qm.FieldCondition(key="section", match=qm.MatchValue(value=f"table:{section}")))
+
+        if section == "taches":
+            should.append(qm.FieldCondition(key="section", match=qm.MatchValue(value="tache:item")))
+
+    # metadata.*
     add_kw("metadata.pays", filters.get("pays"))
     add_kw("metadata.bailleur", filters.get("bailleur"))
     add_kw("metadata.domaine", filters.get("domaine"))
 
-    if not must:
+    if not must and not should:
         return None
-    return qm.Filter(must=must)
+
+    # IMPORTANT: pas de minimum_should_match (non supporté dans ton modèle)
+    if must and should:
+        return qm.Filter(must=must, should=should)
+    if must:
+        return qm.Filter(must=must)
+    return qm.Filter(should=should)
 
 
 # -------------------------
@@ -215,7 +230,6 @@ def search(query: str, top_k: int = 8, filters: Optional[Dict[str, Any]] = None)
         qf = _build_qdrant_filter(filters)
         qc = _get_qdrant()
 
-        # qdrant-client in your env uses query_points(), not search()
         qr = qc.query_points(
             collection_name=settings.qdrant_collection,
             query=vec,
@@ -245,6 +259,15 @@ def search(query: str, top_k: int = 8, filters: Optional[Dict[str, Any]] = None)
         for p in points:
             payload = getattr(p, "payload", None) or {}
             text = payload.get("text") or ""
+                        # ✅ ignore junk chunks (old indexed noise)
+            tt = (text or "").strip()
+            if re.fullmatch(r"[\s\|\-:–—_]+", tt):
+                continue
+            if (
+                len(re.findall(r"[A-Za-zÀ-ÿ0-9]", tt)) < 12
+                and not re.search(r"[A-Za-zÀ-ÿ]{4,}", tt)
+            ):
+                continue
             s_vec = float(getattr(p, "score", 0.0))
 
             candidates.append(
@@ -343,23 +366,46 @@ def _fallback_search(query: str, top_k: int, filters: Dict[str, Any], qdrant_err
         sections = structured.get("sections") or {}
         metadata = structured.get("metadata") or {}
 
+        # -------------------------
         # optional filter by section
-        wanted_section = filters.get("section")
-        section_items = []
+        # -------------------------
+        wanted_section = (filters.get("section") or "").strip()
+        section_items: List[Tuple[str, Any]] = []
+
         if wanted_section:
-            section_items = [(wanted_section, sections.get(wanted_section))]
+            content = sections.get(wanted_section)
+
+            # cas spécial: "taches" peut venir de sections OU de structured["taches"]
+            if (content is None or content == "") and wanted_section == "taches":
+                content = structured.get("taches")
+
+            section_items = [(wanted_section, content)]
         else:
-            # scan only a subset to stay fast
-            for sec in ["mission", "livrables", "profil", "contexte"]:
+            # scan subset large mais contrôlé (rapide + couvre tes nouvelles sections)
+            for sec in [
+                "mission",
+                "livrables",
+                "planning",
+                "profil",
+                "contexte",
+                "evaluation",
+                "candidature",
+                "taches_table",
+            ]:
                 if sec in sections:
                     section_items.append((sec, sections.get(sec)))
+
+            # "taches" : sections["taches"] (string) OU structured["taches"] (list)
             if "taches" in sections:
                 section_items.append(("taches", sections.get("taches")))
+            elif structured.get("taches") is not None:
+                section_items.append(("taches", structured.get("taches")))
 
         # score each block
         for sec, content in section_items:
             if not content:
                 continue
+
             if isinstance(content, list):
                 content_text = "\n- " + "\n- ".join(str(x) for x in content[:40])
             else:
@@ -388,7 +434,6 @@ def _fallback_search(query: str, top_k: int, filters: Dict[str, Any], qdrant_err
     # group fallback results too (same output shape)
     per_doc_snippets = int(getattr(settings, "per_doc_snippets", 3)) if hasattr(settings, "per_doc_snippets") else 3
     grouped = _group_results_by_doc(top_items, query=query, per_doc_snippets=per_doc_snippets)
-
 
     return {
         "mode": "fallback_lexical",

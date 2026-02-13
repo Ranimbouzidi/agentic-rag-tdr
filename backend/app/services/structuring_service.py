@@ -1,6 +1,13 @@
-import re
-from typing import Dict, List, Tuple ,Optional,Any
+# backend/app/services/structuring_service.py
+from __future__ import annotations
 
+import re
+from typing import Dict, List, Tuple, Optional, Any
+
+
+# -------------------------------------------------------------------
+# Keywords métiers (compétences)
+# -------------------------------------------------------------------
 SKILL_KEYWORDS = [
     "ohada",
     "syscohada",
@@ -14,16 +21,18 @@ SKILL_KEYWORDS = [
     "déclarations sociales",
     "bailleurs",
     "ong",
-     "environnement", "social", "sauvegarde", "pgES", "pges", "fies", "mpr", "mgp",
+    "environnement", "social", "sauvegarde", "pges", "fies", "mpr", "mgp",
     "banque mondiale", "bird", "vbg",
 ]
 
 
+# -------------------------------------------------------------------
+# OCR / normalisation
+# -------------------------------------------------------------------
 def fix_ocr_spacing(text: str) -> str:
     """
     Heuristiques légères pour corriger les textes OCR où les espaces sont collés.
-    Objectif: améliorer le split des sections (CONTEXT/OBJECTIFS/MISSION/LIVRABLES...),
-    pas de faire une reconstruction parfaite.
+    Objectif: améliorer la détection des titres/sections, pas reconstruire le texte parfaitement.
     """
     t = text or ""
 
@@ -37,7 +46,7 @@ def fix_ocr_spacing(text: str) -> str:
     t = re.sub(r"([A-Za-zÀ-ÿ])(\d)", r"\1 \2", t)
     t = re.sub(r"(\d)([A-Za-zÀ-ÿ])", r"\1 \2", t)
 
-    # 4) Collages fréquents en OCR sur apostrophes (optionnel)
+    # 4) Collages fréquents OCR sur apostrophes (optionnel)
     # ex: MINISTEREDEL'AGRICULTURE -> MINISTERE DE L'AGRICULTURE
     t = re.sub(r"\b(DE|DU|DES|DEL|D')(?=[A-ZÀ-ÖØ-Ý])", r"\1 ", t)
 
@@ -53,19 +62,19 @@ def normalize_text(text: str) -> str:
 
     t = text
 
-    # ✅ OCR spacing fix en premier (Cas B)
+    # OCR spacing fix
     t = fix_ocr_spacing(t)
 
     # puces → lignes
     t = t.replace("▪", "\n- ").replace("●", "\n- ").replace("•", "\n- ")
 
-    # réinjecter des retours ligne avant titres fréquents (roman numerals)
+    # retours ligne avant titres fréquents (roman numerals)
     t = re.sub(r"(?m)^\s*(I{1,3}\.|IV\.|V\.|VI\.)", r"\n\g<0>", t)
 
     # titres style "A-" en début de ligne
     t = re.sub(r"(?m)^\s*([A-Z]\-)\s*", r"\n\1 ", t)
 
-    # ✅ réduire collages de fin de ligne OCR: "agro-\nsylvo" -> "agrosylvo"
+    # réduire collages de fin de ligne OCR: "agro-\nsylvo" -> "agrosylvo"
     t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
 
     # espaces multiples
@@ -76,11 +85,12 @@ def normalize_text(text: str) -> str:
 
     return t.strip()
 
-def clean_and_dedup_tasks(tasks: list[str]) -> list[str]:
+
+def clean_and_dedup_tasks(tasks: List[str]) -> List[str]:
     if not tasks:
         return []
 
-    cleaned = []
+    cleaned: List[str] = []
     seen = set()
 
     noise_patterns = [
@@ -90,14 +100,18 @@ def clean_and_dedup_tasks(tasks: list[str]) -> list[str]:
         "offre technique",
         "offre financière",
         "critères de sélection",
+        "critères d'évaluation",
+        "proposition financière",
+        "proposition technique",
     ]
 
     for t in tasks:
         if not t:
             continue
         s = " ".join(t.split()).strip()
-
         low = s.lower()
+
+        # filtrage bruit
         if any(p in low for p in noise_patterns):
             continue
 
@@ -110,7 +124,9 @@ def clean_and_dedup_tasks(tasks: list[str]) -> list[str]:
     return cleaned
 
 
-# Mapping : titres possibles -> section canonique
+# -------------------------------------------------------------------
+# Titres / sections
+# -------------------------------------------------------------------
 TITLE_WORDS = [
     # Contexte
     "CONTEXTE", "JUSTIFICATION", "INTRODUCTION", "PRESENTATION", "PRÉSENTATION",
@@ -127,48 +143,52 @@ TITLE_WORDS = [
     "COMPETENCE", "COMPETENCES", "COMPÉTENCE", "COMPÉTENCES", "SKILLS", "EXPERTISE",
 ]
 
+
 def normalize_for_titles(text: str) -> str:
     """
-    Fusion: ton normalize_for_titles actuel + boost OCR.
-    Objectif: aider _is_title_line à détecter les titres même si OCR a collé les espaces.
+    Boost: aide à détecter les titres même si OCR colle des espaces.
     """
     t = text or ""
 
-    # (A) Ton existant : roman numerals -> newline
+    # roman numerals -> newline
     t = re.sub(r"(?<!\n)\s*([IVX]{1,6}\.)\s+", r"\n\1 ", t)
-    # (B) Ton existant : A- / B- -> newline
+
+    # A- / B- -> newline
     t = re.sub(r"(?<!\n)\s*([A-Z])\s*[-–]\s+", r"\n\1- ", t)
 
-    # (C) Boost OCR : "1-CONTEXTE" / "2-OBJECTIFS" -> newline + normalisation "1 - "
+    # "1-CONTEXTE" / "2-OBJECTIFS" -> newline + "1 - "
     t = re.sub(r"(?<!\n)\s*(\d{1,2})\s*[-–—]\s*([A-ZÀ-ÖØ-Ý])", r"\n\1 - \2", t)
 
-    # (D) Boost OCR : isoler des title words quand ils apparaissent au milieu
+    # isoler des title words quand ils apparaissent au milieu
     for w in TITLE_WORDS:
-        # met un \n avant le mot s’il est précédé par espace (ou début), et suivi de ":" ou espace
         t = re.sub(rf"(?i)(^|\s)({re.escape(w)})(\s|:)", r"\n\2\3", t)
 
     return t
 
 
-# -------------------------------------------------------------------
-# 2) Détection de ligne "titre" robuste (natif + OCR)
-# -------------------------------------------------------------------
 TITLE_LINE_REGEXES = [
     r"^\s*[IVX]{1,6}\.\s+.+$",            # I. TITRE
     r"^\s*\d+\.\s+.+$",                   # 1. Titre
-    r"^\s*\d+\s*[-–—]\s*.+$",             # 1 - TITRE (OCR-friendly)
+    r"^\s*\d+\s*[-–—]\s*.+$",             # 1 - TITRE
     r"^\s*[A-Z]\s*[-–]\s+.+$",            # A- Titre
     r"^\s*[A-Z][A-Z\s’'’\-\–—:]{6,}$",    # LIGNE EN MAJUSCULES
     r"^\s*(CONTEXTE|OBJECTIF|OBJECTIFS|MISSION|LIVRABLES|PROFIL|QUALIFICATIONS|COMPETENCES|TACHES|ACTIVITES|METHODOLOGIE|RESULTATS)\b.*$",
 ]
 
+
 def _is_title_line(line: str) -> bool:
     s = (line or "").strip()
     if len(s) < 4:
         return False
-    # trop long => rarement un titre (OCR peut produire des lignes longues)
     if len(s) > 140:
         return False
+
+    # ✅ garde-fou (évite faux titres OCR en MAJUSCULES longues)
+    if len(s.split()) > 15:
+        # on laisse une chance aux patterns très structurés (I., 1., 1 -, A-)
+        if not re.match(r"^\s*([IVX]{1,6}\.|(\d+(\.|[-–—]))|[A-Z]\s*[-–])\s+", s):
+            return False
+
     for rx in TITLE_LINE_REGEXES:
         if re.match(rx, s, flags=re.IGNORECASE):
             return True
@@ -184,45 +204,100 @@ def _is_title_line(line: str) -> bool:
     return False
 
 
-# -------------------------------------------------------------------
-# 3) Mapping titre -> section (FR/EN + OCR-friendly)
-# -------------------------------------------------------------------
+# Mapping titre -> section (ordre = important)
 TITLE_TO_SECTION = [
-    # Contexte
-    (r"\bcontexte\b|\bbackground\b|\bjustification\b|\bprésentation\b|\bintroduction\b", "contexte"),
+    # 1) Candidature / Soumission
+    (
+        r"\b(dossier\s+(à|a)\s+soumettre|"
+        r"pi[eè]ces?\s+(à|a)\s+fournir|"
+        r"modalit[eé]s?\s+de\s+soumission|"
+        r"soumission|candidature|postuler|comment\s+postuler|"
+        r"adresse\s+e-?mail|courrier\s+[eé]lectronique|"
+        r"deadline|date\s+limite|dernier\s+d[eé]lai|date\s+de\s+cl[oô]ture|"
+        r"contact|contacts)\b",
+        "candidature",
+    ),
 
-    # Mission / objectifs / scope (on y met aussi activités/tâches)
-    (r"\bmission\b|\bobjectifs?\b|\bscope of work\b|\bterms of reference\b|\btâches\b|\btasks\b|\bactivit", "mission"),
-    (r"\bm[eé]thodolog", "mission"),
-    (r"\br[eé]sultat", "mission"),
-    (r"\bdescription\b|\bprestations?\b|\bmandat\b", "mission"),
+    # 2) Évaluation / Sélection
+    (
+        r"\b(crit[eè]res?\s+d[’']?[eé]valuation|"
+        r"grille\s+d[’']?[eé]valuation|"
+        r"m[eé]thode\s+d[’']?[eé]valuation|"
+        r"modalit[eé]s?\s+d[’']?[eé]valuation|"
+        r"notation|bar[eè]me|score|pond[eé]ration|"
+        r"s[eé]lection|processus\s+de\s+s[eé]lection|"
+        r"analyse\s+des\s+dossiers|"
+        r"proposition\s+technique|proposition\s+financi[eè]re|"
+        r"offre\s+technique|offre\s+financi[eè]re)\b",
+        "evaluation",
+    ),
 
-    # Livrables
-    (r"\blivrables?\b|\bdeliverables?\b|\boutputs?\b|\brapports?\b|\bplanning\b|\bcalendrier\b", "livrables"),
+    # 3) Tâches / Activités / Responsabilités
+    (
+        r"\b(tâches?|taches?|tasks?|activit[eé]s?|activities?|responsabilit[eé]s?|"
+        r"responsibilities?|r[oô]les?|role|scope\s+des\s+activit[eé]s?)\b",
+        "taches",
+    ),
 
-    # Profil / qualifications
-    (r"\bprofil\b|\bqualifications?\b|\bprofile\b|\bexp[eé]rience\b|\brequired qualifications\b|\bcriteria\b|\bcrit[eè]res\b", "profil"),
+    # 4) Contexte
+    (
+        r"\b(contexte|background|justification|pr[eé]sentation|presentation|"
+        r"introduction|cadre\s+g[eé]n[eé]ral|contexte\s+g[eé]n[eé]ral)\b",
+        "contexte",
+    ),
 
-    # Compétences
-    (r"\bcomp[eé]tences?\b|\bskills\b|\bexpertise\b", "competences"),
+    # 5) Livrables / Outputs
+    (
+        r"\b(livrables?|deliverables?|outputs?|produits?\s+attendus?|"
+        r"r[eé]sultats?\s+attendus?|expected\s+results?|"
+        r"documents?\s+(à|a)\s+remettre|remise\s+des\s+livrables?)\b",
+        "livrables",
+    ),
+    (
+        r"\b(planning|calendrier|timeline|chronogramme|plan\s+de\s+travail|work\s+plan)\b",
+        "planning",
+    ),
+
+    # 6) Profil / Qualifications
+    (
+        r"\b(profil|profile|qualifications?|comp[eé]tences?\s+requises?|"
+        r"exp[eé]rience|experience|pr[eé]requis|prerequis|"
+        r"formation|dipl[oô]me|expertise\s+requise|requirements?|"
+        r"required\s+qualifications?)\b",
+        "profil",
+    ),
+
+    # 7) Compétences
+    (
+        r"\b(comp[eé]tences?|skills?|mots[-\s]?cl[eé]s?|expertise)\b",
+        "competences",
+    ),
+
+    # 8) Mission / Objectifs / Description (général => fin)
+    (
+        r"\b(mission|objectifs?|objective|objectives|description|prestations?|"
+        r"mandat|scope\s+of\s+work|terms?\s+of\s+reference|termes?\s+de\s+r[eé]f[eé]rence)\b",
+        "mission",
+    ),
+    (r"\b(m[eé]thodolog\w*|approche|methodology|approach)\b", "mission"),
+    (r"\b(r[eé]sultat\w*|outcomes?)\b", "mission"),
 ]
+
 
 def _title_to_section(title: str) -> Optional[str]:
     s = (title or "").strip().lower()
     if not s:
         return None
 
-    # OCR-friendly: supprimer espaces/tirets ponctuation pour matcher "OBJECTIFSDUPROJET"
     compact = re.sub(r"[\s’'’\-\–—:_]", "", s)
 
     for pattern, section in TITLE_TO_SECTION:
         if re.search(pattern, s, flags=re.IGNORECASE):
             return section
 
-        # fallback "compact" : ex "objectifsduprojet" contient "objectifs"
-        # on récupère un token simple du pattern si possible
+        # fallback compact
         token = re.sub(r"\\b|\(|\)|\?|\*|\+|\||\.", "", pattern)
-        token = token.split("|")[0]  # premier terme
+        token = token.split("|")[0]
         token_compact = re.sub(r"[\s’'’\-\–—:_]", "", token.lower())
         if token_compact and token_compact in compact:
             return section
@@ -231,11 +306,11 @@ def _title_to_section(title: str) -> Optional[str]:
 
 
 # -------------------------------------------------------------------
-# 4) Window fallback (tu l’as déjà) + fill empties
+# Window fallback scoring
 # -------------------------------------------------------------------
-def _window_extract(text: str, keywords: list[str], window: int = 2500) -> str:
+def _window_extract(text: str, keywords: List[str], window: int = 2500) -> str:
     lower = (text or "").lower()
-    positions = []
+    positions: List[int] = []
 
     compact = lower.replace(" ", "")
     for k in keywords:
@@ -257,33 +332,154 @@ def _window_extract(text: str, keywords: list[str], window: int = 2500) -> str:
     return (text[start:end] or "").strip()
 
 
+def _score_window(window_text: str, include: List[str], exclude: List[str]) -> int:
+    if not window_text:
+        return -10_000
+    low = window_text.lower()
+
+    inc = 0
+    for k in include:
+        k1 = k.lower()
+        if k1 in low or k1.replace(" ", "") in low.replace(" ", ""):
+            inc += 2
+
+    exc = 0
+    for k in exclude:
+        k1 = k.lower()
+        if k1 in low or k1.replace(" ", "") in low.replace(" ", ""):
+            exc += 3
+
+    bonus = 0
+    if re.search(r"(?m)^\s*[-•▪]\s+\S+", window_text):
+        bonus += 2
+
+    if re.search(r"(?i)\b(offre\s+technique|offre\s+financi|proposition\s+technique|proposition\s+financi|notation|bar[eè]me|pond[eé]ration)\b", window_text):
+        bonus += 1
+
+    if len(window_text.strip()) < 120:
+        bonus -= 2
+
+    return inc + bonus - exc
+
+
+def _best_window(text: str, include: List[str], exclude: Optional[List[str]] = None, window: int = 2500) -> str:
+    exclude = exclude or []
+    candidates: List[str] = []
+
+    for k in include[:12]:
+        w = _window_extract(text, [k], window=window)
+        if w:
+            candidates.append(w)
+
+    if not candidates:
+        w = _window_extract(text, include, window=window)
+        return w or ""
+
+    best = ""
+    best_score = -10_000
+    for c in candidates:
+        sc = _score_window(c, include=include, exclude=exclude)
+        if sc > best_score:
+            best_score = sc
+            best = c
+    return best
+
+
 def fill_empty_sections_fallback(text: str, sections: Dict[str, str]) -> Dict[str, str]:
-    # on cherche aussi versions "collées" grâce à _window_extract
-    if not sections.get("mission"):
-        sections["mission"] = _window_extract(
-            text,
-            ["mission", "objectifs", "tâches", "taches", "activités", "activites", "prestations", "scope", "méthodologie", "methodologie", "résultats", "resultats"],
-        )
-    if not sections.get("livrables"):
-        sections["livrables"] = _window_extract(
-            text,
-            ["livrable", "deliverable", "résultats attendus", "resultats attendus", "outputs", "rapport", "planning", "calendrier"],
-        )
-    if not sections.get("profil"):
-        sections["profil"] = _window_extract(
-            text,
-            ["profil", "qualifications", "expérience", "experience", "requirements", "criteria", "critères", "criteres"],
-        )
-    if not sections.get("contexte"):
-        sections["contexte"] = _window_extract(
-            text,
-            ["contexte", "background", "présentation", "presentation", "justification", "introduction"],
-        )
+    """
+    Fallback multi-sections (robuste OCR + procurement).
+    Ne remplace jamais une section déjà remplie.
+    """
+    t = text or ""
+    if not t.strip():
+        return sections
+
+    KW = {
+        "contexte": [
+            "contexte", "background", "justification", "introduction",
+            "présentation", "presentation", "cadre", "contexte général",
+        ],
+        "mission": [
+            "mission", "objectifs", "objectif", "description", "prestations",
+            "mandat", "scope of work", "terms of reference", "termes de référence",
+            "méthodologie", "methodologie", "approche", "résultats", "resultats",
+        ],
+        "taches": [
+            "tâches", "taches", "tasks", "activités", "activites", "activities",
+            "responsabilités", "responsabilites", "rôles", "roles",
+        ],
+        "livrables": [
+            "livrables", "livrable", "deliverable", "deliverables", "outputs",
+            "produits attendus", "documents à remettre", "remise des livrables",
+            "rapport final", "rapport analytique", "policy brief", "feuille de route",
+        ],
+        "planning": [
+            "planning", "calendrier", "timeline", "chronogramme",
+            "durée", "duree", "date", "dates", "délai", "delai",
+        ],
+        "profil": [
+            "profil", "qualifications", "qualification", "profile",
+            "expérience", "experience", "formation", "diplôme", "diplome",
+            "compétences requises", "competences requises", "prérequis", "prerequis",
+            "requirements", "required qualifications",
+        ],
+        "competences": [
+            "compétences", "competences", "skills", "expertise", "mots-clés", "mots cles",
+        ],
+        "evaluation": [
+            "critères d'évaluation", "critères", "criteres", "grille d'évaluation",
+            "notation", "barème", "bareme", "pondération", "ponderation",
+            "proposition technique", "proposition financière", "proposition financiere",
+            "offre technique", "offre financière", "offre financiere",
+            "sélection", "selection", "analyse des dossiers",
+        ],
+        "candidature": [
+            "dossier à soumettre", "dossier a soumettre", "pièces à fournir", "pieces a fournir",
+            "soumission", "candidature", "postuler", "modalités de soumission",
+            "adresse", "email", "e-mail", "courrier électronique", "courrier electronique",
+            "dernier délai", "dernier delai", "date limite", "deadline", "contact",
+        ],
+    }
+
+    EX = {
+        "livrables": ["notation", "barème", "bareme", "pondération", "ponderation", "proposition financière", "offre financière", "critères d'évaluation"],
+        "profil": ["proposition financière", "offre financière", "pondération", "barème", "notation"],
+        "mission": ["dossier à soumettre", "soumission", "postuler", "adresse e-mail", "deadline", "date limite"],
+        "planning": ["pondération", "barème", "notation", "proposition technique", "proposition financière"],
+    }
+
+    if not (sections.get("contexte") or "").strip():
+        sections["contexte"] = _best_window(t, KW["contexte"], window=2600)
+
+    if not (sections.get("candidature") or "").strip():
+        sections["candidature"] = _best_window(t, KW["candidature"], window=2400)
+
+    if not (sections.get("evaluation") or "").strip():
+        sections["evaluation"] = _best_window(t, KW["evaluation"], window=2600)
+
+    if not (sections.get("livrables") or "").strip():
+        sections["livrables"] = _best_window(t, KW["livrables"], exclude=EX["livrables"], window=3000)
+
+    if not (sections.get("planning") or "").strip():
+        sections["planning"] = _best_window(t, KW["planning"], exclude=EX["planning"], window=2400)
+
+    if not (sections.get("profil") or "").strip():
+        sections["profil"] = _best_window(t, KW["profil"], exclude=EX["profil"], window=2800)
+
+    if not (sections.get("taches") or "").strip():
+        sections["taches"] = _best_window(t, KW["taches"], window=2800)
+
+    if not (sections.get("mission") or "").strip():
+        sections["mission"] = _best_window(t, KW["mission"], exclude=EX["mission"], window=3200)
+
+    if not (sections.get("competences") or "").strip():
+        sections["competences"] = _best_window(t, KW["competences"], window=1800)
+
     return sections
 
 
 # -------------------------------------------------------------------
-# 5) Split (conserve ton comportement + améliore OCR)
+# Split par titres (avec sections enrichies)
 # -------------------------------------------------------------------
 def split_into_sections(text: str) -> Dict[str, str]:
     text = normalize_text(text)
@@ -296,7 +492,19 @@ def split_into_sections(text: str) -> Dict[str, str]:
         if _is_title_line(line):
             title_spans.append((i, line.strip()))
 
-    out = {"contexte": "", "mission": "", "livrables": "", "profil": "", "competences": ""}
+    # ✅ inclut taches_table pour stabilité du schéma
+    out: Dict[str, str] = {
+        "contexte": "",
+        "mission": "",
+        "taches": "",
+        "livrables": "",
+        "planning": "",
+        "profil": "",
+        "competences": "",
+        "evaluation": "",
+        "candidature": "",
+        "taches_table": "",
+    }
 
     if not title_spans:
         out["mission"] = text.strip()
@@ -304,44 +512,51 @@ def split_into_sections(text: str) -> Dict[str, str]:
 
     for idx, (start_i, title) in enumerate(title_spans):
         end_i = title_spans[idx + 1][0] if idx + 1 < len(title_spans) else len(lines)
-        block = "\n".join(lines[start_i:end_i]).strip()
+        block = "\n".join(lines[start_i + 1:end_i]).strip()
 
         section = _title_to_section(title)
         if section:
-            if out[section]:
-                out[section] += "\n\n" + block
+            if out.get(section):
+                out[section] = (out[section] + "\n\n" + block).strip()
             else:
                 out[section] = block
 
-    # ✅ Important : si OCR a loupé certaines sections, on complète
     out = fill_empty_sections_fallback(text, out)
     return out
-def extract_skills_from_text(text: str) -> list[str]:
+
+
+# -------------------------------------------------------------------
+# Extraction compétences
+# -------------------------------------------------------------------
+def extract_skills_from_text(text: str) -> List[str]:
     lower = (text or "").lower()
-    found = []
+    found: List[str] = []
     for kw in SKILL_KEYWORDS:
         if kw.lower() in lower:
             found.append(kw.lower())
     return sorted(set(found))
 
-def extract_competences(text: str, max_items: int = 40) -> list[str]:
+
+def extract_competences(text: str, max_items: int = 40) -> List[str]:
     """
     Backward compatible wrapper.
-    Ancien import utilisé par structuring_process_service.py.
-    Si tu utilises déjà extract_skills_from_text() ailleurs, ça ne gêne pas.
     """
     return extract_skills_from_text(text)[:max_items]
 
-def extract_tasks(text: str, max_items: int = 30) -> list[str]:
+
+# -------------------------------------------------------------------
+# Extraction tâches
+# -------------------------------------------------------------------
+def extract_tasks(text: str, max_items: int = 30) -> List[str]:
     """
     Extraction des tâches.
-    - Natif: bullets (-, •, ▪) => OK
-    - OCR: parfois pas de bullets => on récupère aussi les lignes longues finissant par ; ou .
+    - Natif: bullets (-, •, ▪)
+    - OCR: lignes longues "actionables"
     """
     if not text:
         return []
 
-    tasks: list[str] = []
+    tasks: List[str] = []
     seen = set()
 
     lines = (text or "").splitlines()
@@ -350,7 +565,7 @@ def extract_tasks(text: str, max_items: int = 30) -> list[str]:
         if not line:
             continue
 
-        # 1) Bullet tasks (natif + OCR)
+        # Bullet tasks
         if re.match(r"^\s*[▪•\-–]\s+.+", raw):
             item = re.sub(r"^\s*[▪•\-–]\s+", "", raw).strip()
             item = re.sub(r"\s+", " ", item).strip()
@@ -361,8 +576,7 @@ def extract_tasks(text: str, max_items: int = 30) -> list[str]:
                     tasks.append(item)
             continue
 
-        # 2) OCR style: liste séparée par ';' ou lignes longues type "La mission consiste à..."
-        # On prend les lignes "actionables" (commencent par verbe / "Assurer", "Réaliser", "Mettre en place"...)
+        # OCR style: lignes longues actionables
         if len(line) >= 60 and (line.endswith(";") or line.endswith(".") or line.endswith(":")):
             if re.match(r"(?i)^(assurer|réaliser|realiser|mettre|appuyer|participer|élaborer|elaborer|produire|préparer|preparer|organiser|conduire|suivre|analyser|contrôler|controler|former|sensibiliser)\b", line):
                 item = re.sub(r"\s+", " ", line).strip()
@@ -374,39 +588,40 @@ def extract_tasks(text: str, max_items: int = 30) -> list[str]:
         if len(tasks) >= max_items:
             break
 
-    return tasks[:max_items]
+    # ✅ nettoyage + dedup final
+    return clean_and_dedup_tasks(tasks[:max_items])
 
 
-def procurement_fallback(text: str, sections: Dict[str, str], tasks: list[str]) -> Dict[str, str]:
+# -------------------------------------------------------------------
+# Procurement fallback (conservé)
+# -------------------------------------------------------------------
+def procurement_fallback(text: str, sections: Dict[str, str], tasks: List[str]) -> Dict[str, str]:
     """
-    Ton fallback procurement (appel d'offres) — version safe.
-    IMPORTANT: On le gardera, mais il faut l'appeler seulement si markers procurement.
+    Fallback procurement (appel d'offres) — version safe.
+    IMPORTANT: appeler depuis structuring_process_service.py si tu l'utilises.
     """
-    # PROFIL
-    if not sections.get("profil"):
+    if not (sections.get("profil") or "").strip():
         prof = _window_extract(
             text,
             [
                 "l’équipe d’exécution", "l'equipe d'execution", "doit comprendre", "profil",
                 "qualification", "compétences requises", "competences requises",
-                "expérience", "experience", "références", "references"
+                "expérience", "experience", "références", "references",
             ],
             window=2200,
         )
         if prof:
             sections["profil"] = prof
 
-    # MISSION
     mission_txt = (sections.get("mission") or "").lower()
-    if (not sections.get("mission")) or ("offre technique" in mission_txt) or ("soumission" in mission_txt):
+    if (not (sections.get("mission") or "").strip()) or ("offre technique" in mission_txt) or ("soumission" in mission_txt):
         if tasks:
             sections["mission"] = (
                 "Mission principale : réalisation des prestations attendues décrites dans les termes de référence, "
                 "incluant notamment :\n- " + "\n- ".join(tasks[:8])
             )
 
-    # LIVRABLES
-    if not sections.get("livrables"):
+    if not (sections.get("livrables") or "").strip():
         liv = _window_extract(
             text,
             ["livrable", "deliverable", "rapport", "rapports", "planning", "calendrier", "outputs"],
@@ -415,8 +630,7 @@ def procurement_fallback(text: str, sections: Dict[str, str], tasks: list[str]) 
         if liv:
             sections["livrables"] = liv
 
-    # CONTEXTE
-    if not sections.get("contexte"):
+    if not (sections.get("contexte") or "").strip():
         ctx = _window_extract(
             text,
             ["contexte", "introduction", "justification", "présentation", "presentation", "objet", "organisation"],
@@ -427,24 +641,17 @@ def procurement_fallback(text: str, sections: Dict[str, str], tasks: list[str]) 
     return sections
 
 
-__all__ = [
-    "normalize_text",
-    "split_into_sections",
-    "extract_tasks",
-    "extract_competences",
-    "extract_skills_from_text",
-    "procurement_fallback",
-    "clean_and_dedup_tasks",
-]
-
-def extract_markdown_tables(md: str) -> list[dict]:
+# -------------------------------------------------------------------
+# Markdown tables enrichment
+# -------------------------------------------------------------------
+def extract_markdown_tables(md: str) -> List[Dict[str, Any]]:
     """
     Parse markdown tables:
     | H1 | H2 |
     |----|----|
     | v1 | v2 |
     """
-    tables: list[dict] = []
+    tables: List[Dict[str, Any]] = []
     if not md:
         return tables
 
@@ -462,7 +669,7 @@ def extract_markdown_tables(md: str) -> list[dict]:
         headers = [h.strip() for h in header.split("|") if h.strip()]
         i += 2
 
-        rows = []
+        rows: List[Dict[str, str]] = []
         while i < len(lines):
             row_line = lines[i].strip()
             if "|" not in row_line:
@@ -485,14 +692,14 @@ def _norm_header(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _table_signature(headers: list[str]) -> str:
+def _table_signature(headers: List[str]) -> str:
     return " ".join(_norm_header(h) for h in headers)
 
 
-def _table_to_bullets(rows: list[dict], max_items: int = 12) -> str:
-    out = []
+def _table_to_bullets(rows: List[Dict[str, str]], max_items: int = 12) -> str:
+    out: List[str] = []
     for r in rows[:max_items]:
-        parts = []
+        parts: List[str] = []
         for k, v in r.items():
             v = (v or "").strip()
             if not v:
@@ -517,7 +724,6 @@ def _append_section(sections: Dict[str, str], key: str, title: str, bullets: str
         sections[key] = chunk[:max_chars]
         return
 
-    # éviter doublons (simple)
     if bullets in current:
         return
 
@@ -527,11 +733,12 @@ def _append_section(sections: Dict[str, str], key: str, title: str, bullets: str
 
 def enrich_sections_from_markdown_tables(sections: Dict[str, str], markdown: str) -> Dict[str, str]:
     """
-    TABLE-FIRST enrich:
-    - livrables (incl. planning)
+    TABLE-FIRST enrich (robuste):
+    - evaluation (prioritaire, évite pollution livrables)
+    - candidature (dossier à soumettre / email / deadline)
+    - livrables (+ planning)
     - profil
-    - taches (on enrichit 'mission' ou 'taches' selon ton schéma -> ici on enrichit mission via table, ET on renvoie aussi une clé 'taches_table' si tu veux)
-      Comme ton schéma final a déjà 'taches' (liste) extraite ailleurs, on enrichit plutôt la SECTION 'mission' avec le tableau des activités.
+    - tâches/activités -> mission (+ optionnel taches_table)
     """
     if not markdown or not markdown.strip():
         return sections
@@ -540,44 +747,79 @@ def enrich_sections_from_markdown_tables(sections: Dict[str, str], markdown: str
     if not tables:
         return sections
 
-    # Keywords headers -> catégorie
+    EVAL_KEYS = [
+        "critère", "critere", "évaluation", "evaluation", "grille", "notation",
+        "score", "barème", "bareme", "pondération", "ponderation", "%",
+        "proposition technique", "proposition financière", "proposition financiere",
+        "offre technique", "offre financière", "offre financiere",
+        "sélection", "selection",
+    ]
+
+    CANDIDATURE_KEYS = [
+        "dossier", "soumettre", "soumission", "candidature", "postuler",
+        "email", "e-mail", "courrier", "adresse", "contact",
+        "deadline", "date limite", "dernier délai", "dernier delai",
+    ]
+
     LIVRABLE_KEYS = ["livrable", "deliverable", "output", "rapport", "report", "document", "remise"]
     PLANNING_KEYS = ["planning", "calendrier", "timeline", "date", "délai", "delai", "durée", "duree", "jours", "mois"]
     PROFIL_KEYS = ["profil", "profile", "qualification", "qualifications", "expérience", "experience", "diplôme", "diplome", "rôle", "role", "poste", "position"]
     TASK_KEYS = ["tâche", "tache", "task", "activité", "activite", "activity", "responsabilité", "responsabilite", "description", "scope"]
 
+    # assurer présence clé stable
+    sections.setdefault("taches_table", "")
+
     for t in tables:
-        headers = t.get("headers", [])
-        rows = t.get("rows", [])
+        headers = t.get("headers", []) or []
+        rows = t.get("rows", []) or []
         if not headers or not rows:
             continue
 
         sig = _table_signature(headers)
+        bullets = _table_to_bullets(rows)
+        if not bullets:
+            continue
 
-        # Classif table (peut matcher plusieurs)
+        # 0) EVAL (priorité)
+        if any(k in sig for k in EVAL_KEYS):
+            _append_section(sections, "evaluation", "Critères d'évaluation (extraits de tableaux) :", bullets)
+            continue
+
+        # 0bis) CANDIDATURE
+        if any(k in sig for k in CANDIDATURE_KEYS):
+            _append_section(sections, "candidature", "Candidature / Soumission (extraits de tableaux) :", bullets)
+            continue
+
+        # 1) LIVRABLES / PLANNING
         is_livrables = any(k in sig for k in LIVRABLE_KEYS)
         is_planning = any(k in sig for k in PLANNING_KEYS)
-        is_profil = any(k in sig for k in PROFIL_KEYS)
-        is_tasks = any(k in sig for k in TASK_KEYS)
 
-        bullets = _table_to_bullets(rows)
-
-        # 1) LIVRABLES / PLANNING -> sections["livrables"]
         if is_livrables:
             _append_section(sections, "livrables", "Livrables (extraits de tableaux) :", bullets)
-            continue  # souvent suffisant
 
         if is_planning:
-            _append_section(sections, "livrables", "Planning (extraits de tableaux) :", bullets)
-            # pas continue: une table planning peut aussi contenir des livrables -> mais ok
+            _append_section(sections, "planning", "Planning (extraits de tableaux) :", bullets)
 
-        # 2) PROFIL -> sections["profil"]
-        if is_profil:
+        # 2) PROFIL
+        if any(k in sig for k in PROFIL_KEYS):
             _append_section(sections, "profil", "Profil / Qualifications (extraits de tableaux) :", bullets)
 
-        # 3) TACHES/ACTIVITES -> enrichir "mission"
-        # Car ta liste "taches" est déjà calculée (extract_tasks). Ici, on renforce la section mission.
-        if is_tasks:
+        # 3) TACHES -> mission + taches_table
+        if any(k in sig for k in TASK_KEYS):
             _append_section(sections, "mission", "Activités / Tâches (extraits de tableaux) :", bullets)
+            _append_section(sections, "taches_table", "Tâches (tableau) :", bullets)
 
     return sections
+
+
+__all__ = [
+    "normalize_text",
+    "split_into_sections",
+    "extract_tasks",
+    "extract_competences",
+    "extract_skills_from_text",
+    "procurement_fallback",
+    "clean_and_dedup_tasks",
+    "extract_markdown_tables",
+    "enrich_sections_from_markdown_tables",
+]

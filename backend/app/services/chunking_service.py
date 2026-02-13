@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import re
 import hashlib
+from collections import defaultdict
 
 
 # =========================
@@ -13,9 +14,9 @@ import hashlib
 @dataclass
 class Chunk:
     doc_id: str
-    doc_type: str                 # "tdr" | "ami" | "other" | "unknown"
-    section: str                  # e.g. "contexte" | "mission" | "livrables" | "profil" | "taches" | "competences" | "ami:criteres_selection"
-    chunk_index: int
+    doc_type: str
+    section: str
+    chunk_index: int          # ✅ IMPORTANT: index PAR SECTION
     text: str
     metadata: Dict[str, Any]
     competences: List[str]
@@ -26,30 +27,19 @@ class Chunk:
 # =========================
 def _norm_text(s: Optional[str]) -> str:
     s = (s or "").replace("\r", "")
-    # compact blank lines
     s = re.sub(r"\n{3,}", "\n\n", s)
-    # compact spaces
     s = re.sub(r"[ \t]{2,}", " ", s)
     return s.strip()
 
 
 def _looks_like_table_md(block: str) -> bool:
-    """
-    Heuristique Markdown table:
-    - contains header separator line like | --- | --- |
-    """
     b = block or ""
     if "|" not in b:
         return False
-    # header separator row
     return bool(re.search(r"(?m)^\s*\|?[\s:\-]+\|[\s:\-\|]+\s*$", b))
 
 
 def _extract_md_tables(text: str) -> List[str]:
-    """
-    Extract markdown tables (as text blocks) from a markdown-ish string.
-    Keeps them as their own blocks so they don't dominate other sections.
-    """
     if not text:
         return []
 
@@ -67,7 +57,6 @@ def _extract_md_tables(text: str) -> List[str]:
         cur = []
 
     for line in lines:
-        # table-ish line if it has pipes and is not insanely long
         is_table_line = ("|" in line) and (len(line) <= 500)
         if is_table_line:
             in_table = True
@@ -82,41 +71,27 @@ def _extract_md_tables(text: str) -> List[str]:
 
 
 def _remove_tables_from_text(text: str) -> str:
-    """
-    Remove markdown tables from a markdown-ish string to avoid polluting narrative chunks.
-    (We index tables separately.)
-    """
     if not text:
         return ""
-
     tables = _extract_md_tables(text)
     out = text
     for t in tables:
-        # remove exact block once (safe)
         out = out.replace(t, "\n")
     return _norm_text(out)
 
 
 def _split_sentences_fallback(text: str) -> List[str]:
-    """
-    Very light sentence splitter for OCR/noisy text.
-    """
     t = _norm_text(text)
     if not t:
         return []
-    # split on blank lines first (best signal)
     parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
     if len(parts) >= 2:
         return parts
-    # then on punctuation
     parts = [p.strip() for p in re.split(r"(?<=[\.\?!;:])\s+", t) if p.strip()]
     return parts
 
 
 def _build_windows(text: str, target_chars: int, max_chars: int, overlap_chars: int) -> List[str]:
-    """
-    Greedy chunker with overlap based on paragraph/sentence units.
-    """
     units = _split_sentences_fallback(text)
     if not units:
         return []
@@ -131,7 +106,6 @@ def _build_windows(text: str, target_chars: int, max_chars: int, overlap_chars: 
             return
         chunk = _norm_text("\n\n".join(cur))
         if chunk:
-            # hard cap
             if len(chunk) > max_chars:
                 chunk = chunk[:max_chars].rstrip()
             chunks.append(chunk)
@@ -143,15 +117,20 @@ def _build_windows(text: str, target_chars: int, max_chars: int, overlap_chars: 
         if not u:
             continue
 
-        # if a single unit is huge, split it hard
+        # unit huge => hard split (safe overlap)
         if len(u) > max_chars:
-            # flush current
             flush()
             start = 0
-            while start < len(u):
-                end = min(start + max_chars, len(u))
+            n = len(u)
+            while start < n:
+                end = min(start + max_chars, n)
                 chunks.append(_norm_text(u[start:end]))
-                start = max(0, end - overlap_chars)
+                if end >= n:
+                    break
+                next_start = end - overlap_chars if overlap_chars > 0 else end
+                if next_start <= start:
+                    next_start = end
+                start = next_start
             continue
 
         if cur_len + len(u) + 2 <= target_chars or not cur:
@@ -159,7 +138,6 @@ def _build_windows(text: str, target_chars: int, max_chars: int, overlap_chars: 
             cur_len += len(u) + 2
         else:
             flush()
-            # overlap: bring tail from previous chunk
             if overlap_chars > 0 and chunks:
                 prev = chunks[-1]
                 tail = prev[-overlap_chars:].strip()
@@ -177,35 +155,52 @@ def _build_windows(text: str, target_chars: int, max_chars: int, overlap_chars: 
     return chunks
 
 
+def _stable_hash(text: str, size: int = 10) -> str:
+    h = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+    return h[:size]
+
+
 def _section_priority(doc_type: str) -> List[str]:
-    """
-    Order matters: we want the most query-relevant sections to be indexed early.
-    (Doesn't change correctness; helps debugging & consistent chunk ids.)
-    """
+    # ✅ inclut les nouvelles sections
     if doc_type == "ami":
         return [
             "contexte",
             "mission",
             "profil",
             "livrables",
-            "taches",
+            "taches",          # texte section
+            "evaluation",
+            "candidature",
+            "planning",
+            "taches_table",
             "ami:criteres_selection",
             "ami:deadline",
         ]
-    # tdr / other
     return [
         "contexte",
         "mission",
+        "taches",          # texte section
         "livrables",
+        "planning",
         "profil",
-        "taches",
-        "competences",
+        "evaluation",
+        "candidature",
+        "taches_table",
+        "competences",     # texte section (si jamais)
     ]
 
 
-def _stable_hash(text: str, size: int = 10) -> str:
-    h = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
-    return h[:size]
+def _normalize_list(x: Any) -> List[str]:
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(i).strip() for i in x if str(i).strip()]
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return []
+        return [s]
+    return [str(x).strip()] if str(x).strip() else []
 
 
 # =========================
@@ -218,40 +213,42 @@ def build_chunks_from_structured(
     overlap_chars: int = 120,
 ) -> List[Chunk]:
     """
-    Input: your structured JSON (TDR or AMI), example:
-      {
-        "doc_id": "...",
-        "doc_type": "tdr"/"ami"/...,
-        "metadata": {...},
-        "sections": {...},
-        "ami_fields": {...}  # optional
-      }
+    Build chunks for embeddings/Qdrant from structured JSON.
 
-    Output: List[Chunk] ready for embeddings + Qdrant payload.
-
-    Strategy (optimal V1):
-    - "Section-first" chunking: each section chunked independently
-    - Tables are extracted (from markdown-ish sections) and indexed separately with "table:" prefix
-    - "taches" list is indexed as (a) whole list summary + (b) per-item short chunks
-    - competences list is indexed as a compact "skills" chunk
+    - Section-first chunking
+    - Markdown tables extracted and indexed separately as "table:<section>"
+    - Tasks indexed as:
+        (1) "taches" summary chunk
+        (2) per-item "tache:item"
+    - Skills indexed as "competences"
+    - AMI extra fields indexed as "ami:*"
+    - chunk_index is PER SECTION (stable neighbors within a section)
     """
+
     doc_id = str(structured.get("doc_id") or "").strip()
     if not doc_id:
         raise ValueError("structured missing doc_id")
 
-    doc_type = (structured.get("doc_type") or structured.get("metadata", {}).get("doc_type") or "unknown").strip().lower()
+    doc_type = (
+        (structured.get("doc_type") or structured.get("metadata", {}).get("doc_type") or "unknown")
+        .strip()
+        .lower()
+    )
     if not doc_type:
         doc_type = "unknown"
 
     metadata = structured.get("metadata") or {}
     sections = structured.get("sections") or {}
+
+    # -------------------------
+    # Normalize competences list
+    # -------------------------
     competences_list = sections.get("competences") or []
     if isinstance(competences_list, str):
         competences_list = [competences_list]
     if not isinstance(competences_list, list):
         competences_list = []
 
-    # Normalize skills
     competences: List[str] = []
     seen = set()
     for c in competences_list:
@@ -262,52 +259,87 @@ def build_chunks_from_structured(
         competences.append(s)
 
     chunks: List[Chunk] = []
-    idx = 0
 
-    # ---------
-    # Helper to add chunk
-    # ---------
+    # ✅ chunk_index stable per section
+    section_counters: Dict[str, int] = {}
+
+    def _normalize_list(x: Any) -> List[str]:
+        if x is None:
+            return []
+        if isinstance(x, list):
+            out = []
+            for it in x:
+                s = str(it or "").strip()
+                if s:
+                    out.append(s)
+            return out
+        if isinstance(x, str):
+            # if OCR gave one big block
+            lines = [l.strip() for l in x.splitlines() if l.strip()]
+            return lines
+        return []
+
+    # -------------------------
+    # Helper: add chunk
+    # -------------------------
     def add(section_name: str, text: str):
-        nonlocal idx
         t = _norm_text(text)
         if not t:
             return
+
+        # ✅ skip junk remnants like "|" or "--|" or tiny table separators
+        if re.fullmatch(r"[\s\|\-:–—_]+", t):
+            return
+        pipe_count = t.count("|")
+        alpha_count = len(re.findall(r"[A-Za-zÀ-ÿ]", t))
+        digit_count = len(re.findall(r"[0-9]", t))
+        alnum_count = alpha_count + digit_count
+
+        if pipe_count >= 8 and alnum_count < 40:
+            return
+        if t.lstrip().startswith("|") and alnum_count < 60:
+            return
+        
+        if alnum_count < 12 and not re.search(r"[A-Za-zÀ-ÿ]{4,}", t):
+            return
+
+        ci = section_counters.get(section_name, 0)
+        section_counters[section_name] = ci + 1
+
         chunks.append(
             Chunk(
                 doc_id=doc_id,
                 doc_type=doc_type,
                 section=section_name,
-                chunk_index=idx,
+                chunk_index=ci,
                 text=t,
                 metadata=metadata,
                 competences=competences,
             )
         )
-        idx += 1
 
-    # ---------
-    # 1) Index core narrative sections
-    # ---------
+    # -------------------------
+    # 1) Index narrative sections (inclut nouvelles sections)
+    # -------------------------
     order = _section_priority(doc_type)
+
     for sec in order:
         if sec.startswith("ami:"):
-            continue  # handled below
+            continue  # handled in AMI block below
 
         raw = sections.get(sec)
-        # special: lists
-        if sec == "taches":
-            continue
-        if sec == "competences":
+        if raw is None:
             continue
 
+        # sections expected as strings
         if not isinstance(raw, str):
-            raw = str(raw) if raw is not None else ""
+            raw = str(raw)
 
         raw = _norm_text(raw)
         if not raw:
             continue
 
-        # table-first: if section contains markdown tables, split them out
+        # extract tables out of section content
         tables = _extract_md_tables(raw)
         narrative = _remove_tables_from_text(raw)
 
@@ -315,43 +347,44 @@ def build_chunks_from_structured(
         for w in _build_windows(narrative, target_chars, max_chars, overlap_chars):
             add(sec, w)
 
-        # tables as separate chunks (small cap)
-        for ti, tb in enumerate(tables[:8]):  # avoid exploding
+        # tables separately
+        for tb in tables[:10]:
             tb = _norm_text(tb)
             if tb:
                 add(f"table:{sec}", tb)
 
-    # ---------
-    # 2) Tasks: list → chunks
-    # ---------
-    taches = sections.get("taches") or []
-    if isinstance(taches, str):
-        # sometimes OCR gives a block string
-        taches = [t.strip() for t in taches.splitlines() if t.strip()]
-    if not isinstance(taches, list):
-        taches = []
+    # -------------------------
+    # 2) Tasks list (top-level) -> chunks
+    # -------------------------
+    # ✅ nouveau payload: structured["taches"] = liste (prioritaire)
+    taches_list = structured.get("taches")
+    if taches_list is None:
+        # fallback ancien format
+        taches_list = sections.get("taches")
 
-    # summary chunk (query-friendly)
+    taches = _normalize_list(taches_list)
+
     if taches:
-        summary = "Tâches / activités principales :\n- " + "\n- ".join([_norm_text(str(x)) for x in taches[:25] if _norm_text(str(x))])
-        add("taches", summary)
+        summary_items = [_norm_text(x) for x in taches[:25] if _norm_text(x)]
+        if summary_items:
+            summary = "Tâches / activités principales :\n- " + "\n- ".join(summary_items)
+            add("taches", summary)
 
-        # per-item chunks (better recall for specific task queries)
+        # per-item chunks
         for item in taches[:40]:
-            it = _norm_text(str(item))
+            it = _norm_text(item)
             if it and len(it) >= 8:
-                # stable micro id inside text helps debug
                 add("tache:item", f"[task:{_stable_hash(it)}] {it}")
 
-    # ---------
-    # 3) Competences: compact chunk
-    # ---------
+    # -------------------------
+    # 3) Competences list -> compact chunk
+    # -------------------------
     if competences:
         add("competences", "Compétences / mots-clés détectés : " + ", ".join(competences[:80]))
 
-    # ---------
-    # 4) AMI fields (if doc_type ami)
-    # ---------
+    # -------------------------
+    # 4) AMI fields
+    # -------------------------
     ami_fields = structured.get("ami_fields") or {}
     if isinstance(ami_fields, dict) and doc_type == "ami":
         deadline = _norm_text(str(ami_fields.get("deadline") or ""))
@@ -370,7 +403,6 @@ def build_chunks_from_structured(
 
         criteres = _norm_text(str(ami_fields.get("criteres_selection") or ""))
         if criteres:
-            # same table-first logic
             tables = _extract_md_tables(criteres)
             narrative = _remove_tables_from_text(criteres)
 
@@ -378,7 +410,8 @@ def build_chunks_from_structured(
                 add("ami:criteres_selection", w)
 
             for tb in tables[:10]:
-                add("table:ami_criteres_selection", tb)
+                tb = _norm_text(tb)
+                if tb:
+                    add("table:ami_criteres_selection", tb)
 
-    # Final guard: avoid empty
     return chunks
