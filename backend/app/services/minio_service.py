@@ -2,12 +2,8 @@ from minio import Minio
 from app.core.settings import settings
 from pathlib import Path
 import io
-from typing import Optional
 
-
-# hedhy l service mta3 minio eli bch y3awenna nconnectiw lminio w n3mlou upload lfiles
-# w nensureiw eli les buckets eli 7atithom fil settings mawjoudeen w idha ma mawjoudeen n3mlouhom create automatiquement
-# cloud ready: compatible S3/minio gateways + idempotent bucket creation
+from app.services.tracing import span_step
 
 
 def get_minio_client() -> Minio:
@@ -21,21 +17,35 @@ def get_minio_client() -> Minio:
 
 
 def ensure_buckets():
-    client = get_minio_client()
-    for bucket in [settings.minio_bucket_raw, settings.minio_bucket_processed]:
-        if not client.bucket_exists(bucket):
-            client.make_bucket(bucket)
+    with span_step("minio.ensure_buckets"):
+        client = get_minio_client()
+        for bucket in [settings.minio_bucket_raw, settings.minio_bucket_processed]:
+            with span_step("minio.ensure_bucket", bucket=bucket):
+                if not client.bucket_exists(bucket):
+                    client.make_bucket(bucket)
 
 
 def upload_file(bucket: str, object_name: str, file_path: str):
-    client = get_minio_client()
-    client.fput_object(bucket, object_name, file_path)
+    with span_step(
+        "minio.upload_file",
+        bucket=bucket,
+        object_key=object_name,
+        file_path=str(file_path),
+    ):
+        client = get_minio_client()
+        client.fput_object(bucket, object_name, file_path)
 
 
 def download_file(bucket: str, object_name: str, dest_path: Path):
-    client = get_minio_client()
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    client.fget_object(bucket, object_name, str(dest_path))
+    with span_step(
+        "minio.download_file",
+        bucket=bucket,
+        object_key=object_name,
+        dest_path=str(dest_path),
+    ):
+        client = get_minio_client()
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        client.fget_object(bucket, object_name, str(dest_path))
 
 
 # -------------------------
@@ -51,60 +61,74 @@ def upload_text(
     Upload du texte en MinIO.
     content_type configurable (text/plain, text/markdown).
     """
-    client = get_minio_client()
-    data = (text or "").encode("utf-8")
-    client.put_object(
-        bucket,
-        object_name,
-        io.BytesIO(data),
-        length=len(data),
+    with span_step(
+        "minio.upload_text",
+        bucket=bucket,
+        object_key=object_name,
         content_type=content_type,
-    )
+        text_len=len(text or ""),
+    ):
+        client = get_minio_client()
+        data = (text or "").encode("utf-8")
+        client.put_object(
+            bucket,
+            object_name,
+            io.BytesIO(data),
+            length=len(data),
+            content_type=content_type,
+        )
 
 
 def upload_markdown(bucket: str, object_name: str, markdown: str):
     """
     Helper dédié Markdown (Docling -> extracted.md)
     """
-    upload_text(bucket, object_name, markdown, content_type="text/markdown; charset=utf-8")
+    with span_step(
+        "minio.upload_markdown",
+        bucket=bucket,
+        object_key=object_name,
+        md_len=len(markdown or ""),
+    ):
+        upload_text(bucket, object_name, markdown, content_type="text/markdown; charset=utf-8")
 
 
 def download_text(bucket: str, object_name: str) -> str:
-    client = get_minio_client()
-    resp = None
-    try:
-        resp = client.get_object(bucket, object_name)
-        raw = resp.read()
-
-        # 1) try utf-8 strict
+    with span_step("minio.download_text", bucket=bucket, object_key=object_name):
+        client = get_minio_client()
+        resp = None
         try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            pass
+            resp = client.get_object(bucket, object_name)
+            raw = resp.read()
 
-        # 2) try windows-1252 (common for FR docs)
-        try:
-            return raw.decode("cp1252")
-        except UnicodeDecodeError:
-            pass
+            # 1) try utf-8 strict
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
 
-        # 3) last resort
-        return raw.decode("latin-1", errors="replace")
+            # 2) try windows-1252 (common for FR docs)
+            try:
+                return raw.decode("cp1252")
+            except UnicodeDecodeError:
+                pass
 
-    finally:
-        if resp is not None:
-            resp.close()
-            resp.release_conn()
+            # 3) last resort
+            return raw.decode("latin-1", errors="replace")
 
+        finally:
+            if resp is not None:
+                resp.close()
+                resp.release_conn()
 
 
 def object_exists(bucket: str, object_name: str) -> bool:
     """
     True si l’objet existe dans le bucket.
     """
-    client = get_minio_client()
-    try:
-        client.stat_object(bucket, object_name)
-        return True
-    except Exception:
-        return False
+    with span_step("minio.object_exists", bucket=bucket, object_key=object_name):
+        client = get_minio_client()
+        try:
+            client.stat_object(bucket, object_name)
+            return True
+        except Exception:
+            return False

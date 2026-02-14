@@ -15,6 +15,8 @@ from app.services.db_service import engine, documents
 from app.services.minio_service import download_text
 from app.services.embedding_service import embed_batch
 from app.services.bm25_service import bm25_scores
+from app.services.tracing import span_step
+
 
 # -------------------------
 # Utils
@@ -27,7 +29,6 @@ def _tokens(s: str) -> List[str]:
 
 
 def _contains_all_filters(doc_row: Dict[str, Any], filters: Dict[str, Any]) -> bool:
-    # filtres DB (colonne documents)
     for k in ["doc_type", "pays", "bailleur", "domaine", "region", "language"]:
         v = filters.get(k)
         if not v:
@@ -38,9 +39,6 @@ def _contains_all_filters(doc_row: Dict[str, Any], filters: Dict[str, Any]) -> b
 
 
 def _keyword_score(query_tokens: List[str], text: str) -> float:
-    """
-    Lexical score V1 (cheap, works well) - USED ONLY FOR FALLBACK.
-    """
     if not query_tokens:
         return 0.0
 
@@ -52,12 +50,10 @@ def _keyword_score(query_tokens: List[str], text: str) -> float:
         if p >= 0:
             score += 1.0 / math.log(3.0 + p)
 
-    # phrase bonus
     q = " ".join(query_tokens)
     if len(q) >= 10 and q in lower:
         score += 0.8
 
-    # small bonus for email/date-ish queries
     if any("@" in t for t in query_tokens) and "@" in lower:
         score += 0.4
     if any(re.match(r"\d{4}", t) for t in query_tokens) and re.search(r"\b\d{4}\b", lower):
@@ -77,10 +73,6 @@ def _minmax_norm(values: List[float]) -> List[float]:
 
 
 def _dedup_by_doc_id(items: List[Dict[str, Any]], max_per_doc: int = 3) -> List[Dict[str, Any]]:
-    """
-    Prevent 10 chunks from same doc. Keep best chunks per doc_id.
-    (This expects items already sorted by score desc.)
-    """
     out: List[Dict[str, Any]] = []
     counts: Dict[str, int] = {}
     for it in items:
@@ -108,10 +100,6 @@ def _make_snippet(text: str, query: str, max_len: int = 320) -> str:
 
 
 def _group_results_by_doc(items: List[Dict[str, Any]], query: str, per_doc_snippets: int = 3) -> List[Dict[str, Any]]:
-    """
-    Input: chunk-level items (each has text, score_final, etc.)
-    Output: doc-level results with snippets.
-    """
     grouped: Dict[str, Dict[str, Any]] = {}
 
     for it in items:
@@ -130,7 +118,6 @@ def _group_results_by_doc(items: List[Dict[str, Any]], query: str, per_doc_snipp
             }
             g = grouped[doc_id]
 
-        # update best doc score if needed
         sc = float(it.get("score_final") or it.get("score") or 0.0)
         if sc > float(g.get("score") or 0.0):
             g["score"] = sc
@@ -139,7 +126,6 @@ def _group_results_by_doc(items: List[Dict[str, Any]], query: str, per_doc_snipp
             if it.get("metadata"):
                 g["metadata"] = it.get("metadata")
 
-        # keep snippets
         g["snippets"].append(
             {
                 "section": it.get("section"),
@@ -151,7 +137,6 @@ def _group_results_by_doc(items: List[Dict[str, Any]], query: str, per_doc_snipp
             }
         )
 
-    # sort snippets inside each doc + cut
     for g in grouped.values():
         g["snippets"].sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
         g["snippets"] = g["snippets"][:per_doc_snippets]
@@ -177,19 +162,15 @@ def _build_qdrant_filter(filters: Dict[str, Any]) -> Optional[qm.Filter]:
             return
         must.append(qm.FieldCondition(key=field, match=qm.MatchValue(value=value)))
 
-    # doc_type exact
     add_kw("doc_type", filters.get("doc_type"))
 
-    # section variants
     section = (filters.get("section") or "").strip()
     if section:
         should.append(qm.FieldCondition(key="section", match=qm.MatchValue(value=section)))
         should.append(qm.FieldCondition(key="section", match=qm.MatchValue(value=f"table:{section}")))
-
         if section == "taches":
             should.append(qm.FieldCondition(key="section", match=qm.MatchValue(value="tache:item")))
 
-    # metadata.*
     add_kw("metadata.pays", filters.get("pays"))
     add_kw("metadata.bailleur", filters.get("bailleur"))
     add_kw("metadata.domaine", filters.get("domaine"))
@@ -197,7 +178,6 @@ def _build_qdrant_filter(filters: Dict[str, Any]) -> Optional[qm.Filter]:
     if not must and not should:
         return None
 
-    # IMPORTANT: pas de minimum_should_match (non supporté dans ton modèle)
     if must and should:
         return qm.Filter(must=must, should=should)
     if must:
@@ -214,32 +194,104 @@ def search(query: str, top_k: int = 8, filters: Optional[Dict[str, Any]] = None)
     if not query:
         raise ValueError("query is required")
 
-    # Hybrid params (safe defaults)
-    w_vec = float(getattr(settings, "hybrid_w_vec", 0.70)) if hasattr(settings, "hybrid_w_vec") else 0.70
-    w_bm25 = float(getattr(settings, "hybrid_w_lex", 0.30)) if hasattr(settings, "hybrid_w_lex") else 0.30
-    pool_mult = int(getattr(settings, "hybrid_pool_mult", 8)) if hasattr(settings, "hybrid_pool_mult") else 8
-    pool_k = max(top_k, top_k * pool_mult)
+    with span_step("search.request", top_k=top_k, query_len=len(query), filters_count=len(filters)) as span:
+        w_vec = float(getattr(settings, "hybrid_w_vec", 0.70)) if hasattr(settings, "hybrid_w_vec") else 0.70
+        w_bm25 = float(getattr(settings, "hybrid_w_lex", 0.30)) if hasattr(settings, "hybrid_w_lex") else 0.30
+        pool_mult = int(getattr(settings, "hybrid_pool_mult", 8)) if hasattr(settings, "hybrid_pool_mult") else 8
+        pool_k = max(top_k, top_k * pool_mult)
 
-    # snippets settings
-    per_doc_snippets = int(getattr(settings, "per_doc_snippets", 3)) if hasattr(settings, "per_doc_snippets") else 3
-    max_per_doc_chunks = int(getattr(settings, "max_per_doc_chunks", 3)) if hasattr(settings, "max_per_doc_chunks") else 3
+        per_doc_snippets = int(getattr(settings, "per_doc_snippets", 3)) if hasattr(settings, "per_doc_snippets") else 3
+        max_per_doc_chunks = int(getattr(settings, "max_per_doc_chunks", 3)) if hasattr(settings, "max_per_doc_chunks") else 3
 
-    # 1) Qdrant (vector pool) -> BM25 rerank on pool -> fuse -> group
-    try:
-        vec = embed_batch([query])[0]
-        qf = _build_qdrant_filter(filters)
-        qc = _get_qdrant()
+        span.set_attribute("hybrid.w_vec", w_vec)
+        span.set_attribute("hybrid.w_bm25", w_bm25)
+        span.set_attribute("hybrid.pool_k", pool_k)
 
-        qr = qc.query_points(
-            collection_name=settings.qdrant_collection,
-            query=vec,
-            limit=pool_k,
-            with_payload=True,
-            query_filter=qf,
-        )
+        # 1) Qdrant hybrid
+        try:
+            with span_step("search.embed_query", model=getattr(settings, "embed_model", ""), batch_size=1):
+                vec = embed_batch([query])[0]
 
-        points = getattr(qr, "points", None) or []
-        if not points:
+            qf = _build_qdrant_filter(filters)
+
+            with span_step("qdrant.query_points", collection=settings.qdrant_collection, limit=pool_k, has_filter=bool(qf)):
+                qc = _get_qdrant()
+                qr = qc.query_points(
+                    collection_name=settings.qdrant_collection,
+                    query=vec,
+                    limit=pool_k,
+                    with_payload=True,
+                    query_filter=qf,
+                )
+
+            points = getattr(qr, "points", None) or []
+            if not points:
+                return {
+                    "mode": "qdrant_hybrid_bm25",
+                    "query": query,
+                    "top_k": top_k,
+                    "filters": filters,
+                    "weights": {"vector": w_vec, "bm25": w_bm25},
+                    "pool_k": pool_k,
+                    "results": [],
+                    "note": "Qdrant returned 0 points (filters too strict or collection empty).",
+                }
+
+            with span_step("search.build_candidates", points_count=len(points)):
+                candidates: List[Dict[str, Any]] = []
+                texts: List[str] = []
+                vec_scores: List[float] = []
+
+                for p in points:
+                    payload = getattr(p, "payload", None) or {}
+                    text = payload.get("text") or ""
+                    tt = (text or "").strip()
+
+                    # ignore junk chunks
+                    if re.fullmatch(r"[\s\|\-:–—_]+", tt):
+                        continue
+                    if (
+                        len(re.findall(r"[A-Za-zÀ-ÿ0-9]", tt)) < 12
+                        and not re.search(r"[A-Za-zÀ-ÿ]{4,}", tt)
+                    ):
+                        continue
+
+                    s_vec = float(getattr(p, "score", 0.0))
+
+                    candidates.append(
+                        {
+                            "doc_id": payload.get("doc_id"),
+                            "doc_type": payload.get("doc_type"),
+                            "section": payload.get("section"),
+                            "chunk_index": payload.get("chunk_index"),
+                            "text": text,
+                            "metadata": payload.get("metadata") or {},
+                            "score_vector": s_vec,
+                        }
+                    )
+                    texts.append(str(text))
+                    vec_scores.append(s_vec)
+
+            with span_step("search.bm25_scores", pool_texts=len(texts)):
+                bm25_raw = bm25_scores(query, texts)
+
+            with span_step("search.fuse_scores", candidates=len(candidates)):
+                vnorm = _minmax_norm(vec_scores)
+                bnorm = _minmax_norm(bm25_raw)
+
+                for i, it in enumerate(candidates):
+                    it["score_bm25"] = float(bm25_raw[i])
+                    it["score"] = (w_vec * vnorm[i]) + (w_bm25 * bnorm[i])
+                    it["score_final"] = it["score"]
+
+                candidates.sort(key=lambda x: float(x.get("score_final") or 0.0), reverse=True)
+
+            with span_step("search.dedup_by_doc", max_per_doc=max_per_doc_chunks):
+                candidates = _dedup_by_doc_id(candidates, max_per_doc=max_per_doc_chunks)
+
+            with span_step("search.group_results", per_doc_snippets=per_doc_snippets):
+                grouped = _group_results_by_doc(candidates, query=query, per_doc_snippets=per_doc_snippets)
+
             return {
                 "mode": "qdrant_hybrid_bm25",
                 "query": query,
@@ -247,200 +299,135 @@ def search(query: str, top_k: int = 8, filters: Optional[Dict[str, Any]] = None)
                 "filters": filters,
                 "weights": {"vector": w_vec, "bm25": w_bm25},
                 "pool_k": pool_k,
-                "results": [],
-                "note": "Qdrant returned 0 points (filters too strict or collection empty).",
+                "results": grouped[:top_k],
             }
 
-        # Build candidates from pool
-        candidates: List[Dict[str, Any]] = []
-        texts: List[str] = []
-        vec_scores: List[float] = []
-
-        for p in points:
-            payload = getattr(p, "payload", None) or {}
-            text = payload.get("text") or ""
-                        # ✅ ignore junk chunks (old indexed noise)
-            tt = (text or "").strip()
-            if re.fullmatch(r"[\s\|\-:–—_]+", tt):
-                continue
-            if (
-                len(re.findall(r"[A-Za-zÀ-ÿ0-9]", tt)) < 12
-                and not re.search(r"[A-Za-zÀ-ÿ]{4,}", tt)
-            ):
-                continue
-            s_vec = float(getattr(p, "score", 0.0))
-
-            candidates.append(
-                {
-                    "doc_id": payload.get("doc_id"),
-                    "doc_type": payload.get("doc_type"),
-                    "section": payload.get("section"),
-                    "chunk_index": payload.get("chunk_index"),
-                    "text": text,
-                    "metadata": payload.get("metadata") or {},
-                    "score_vector": s_vec,
-                }
-            )
-            texts.append(str(text))
-            vec_scores.append(s_vec)
-
-        # BM25 rerank on the same pool
-        bm25_raw = bm25_scores(query, texts)
-
-        # normalize + fuse
-        vnorm = _minmax_norm(vec_scores)
-        bnorm = _minmax_norm(bm25_raw)
-
-        for i, it in enumerate(candidates):
-            it["score_bm25"] = float(bm25_raw[i])
-            it["score"] = (w_vec * vnorm[i]) + (w_bm25 * bnorm[i])
-            it["score_final"] = it["score"]
-
-        candidates.sort(key=lambda x: float(x.get("score_final") or 0.0), reverse=True)
-
-        # keep top_k chunks but avoid flooding with same doc
-        candidates = _dedup_by_doc_id(candidates, max_per_doc=max_per_doc_chunks)
-
-        # group by doc with snippets
-        grouped = _group_results_by_doc(candidates, query=query, per_doc_snippets=per_doc_snippets)
-
-        return {
-            "mode": "qdrant_hybrid_bm25",
-            "query": query,
-            "top_k": top_k,
-            "filters": filters,
-            "weights": {"vector": w_vec, "bm25": w_bm25},
-            "pool_k": pool_k,
-            "results": grouped[:top_k],
-        }
-
-    except Exception as qerr:
-        # 2) Fallback lexical (MinIO scan)
-        return _fallback_search(query=query, top_k=top_k, filters=filters, qdrant_error=str(qerr))
+        except Exception as qerr:
+            span.set_attribute("search.qdrant_error", str(qerr))
+            return _fallback_search(query=query, top_k=top_k, filters=filters, qdrant_error=str(qerr))
 
 
 def _fallback_search(query: str, top_k: int, filters: Dict[str, Any], qdrant_error: str) -> Dict[str, Any]:
-    # IMPORTANT: keep it bounded to stay fast
     MAX_DOCS = int(getattr(settings, "fallback_max_docs", 50)) if hasattr(settings, "fallback_max_docs") else 50
 
-    q_tokens = _tokens(query)
-    if not q_tokens:
-        q_tokens = [query.lower()]
+    with span_step("search.fallback", top_k=top_k, max_docs=MAX_DOCS) as span:
+        q_tokens = _tokens(query)
+        if not q_tokens:
+            q_tokens = [query.lower()]
 
-    # 1) select docs from DB (latest first) + apply DB filters
-    with engine.begin() as conn:
-        rows = conn.execute(
-            sa.select(
-                documents.c.id,
-                documents.c.doc_type,
-                documents.c.language,
-                documents.c.pays,
-                documents.c.bailleur,
-                documents.c.domaine,
-                documents.c.region,
-                documents.c.processed_bucket,
-                documents.c.processed_prefix,
-                documents.c.updated_at,
-            )
-            .order_by(documents.c.updated_at.desc())
-            .limit(MAX_DOCS)
-        ).mappings().all()
+        # 1) select docs from DB
+        with span_step("search.fallback.load_db_docs", limit=MAX_DOCS):
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    sa.select(
+                        documents.c.id,
+                        documents.c.doc_type,
+                        documents.c.language,
+                        documents.c.pays,
+                        documents.c.bailleur,
+                        documents.c.domaine,
+                        documents.c.region,
+                        documents.c.processed_bucket,
+                        documents.c.processed_prefix,
+                        documents.c.updated_at,
+                    )
+                    .order_by(documents.c.updated_at.desc())
+                    .limit(MAX_DOCS)
+                ).mappings().all()
 
-    candidates: List[Dict[str, Any]] = []
-    for r in rows:
-        r = dict(r)
-        if not _contains_all_filters(r, filters):
-            continue
+        candidates: List[Dict[str, Any]] = []
+        scanned = 0
 
-        bucket = r["processed_bucket"]
-        prefix = r["processed_prefix"]
-        structured_key = f"{prefix}structured/tdr_structured.json"
-
-        try:
-            raw = download_text(bucket, structured_key)
-            structured = json.loads(raw)
-        except Exception:
-            continue
-
-        doc_type = (structured.get("doc_type") or r.get("doc_type") or "unknown")
-        sections = structured.get("sections") or {}
-        metadata = structured.get("metadata") or {}
-
-        # -------------------------
-        # optional filter by section
-        # -------------------------
-        wanted_section = (filters.get("section") or "").strip()
-        section_items: List[Tuple[str, Any]] = []
-
-        if wanted_section:
-            content = sections.get(wanted_section)
-
-            # cas spécial: "taches" peut venir de sections OU de structured["taches"]
-            if (content is None or content == "") and wanted_section == "taches":
-                content = structured.get("taches")
-
-            section_items = [(wanted_section, content)]
-        else:
-            # scan subset large mais contrôlé (rapide + couvre tes nouvelles sections)
-            for sec in [
-                "mission",
-                "livrables",
-                "planning",
-                "profil",
-                "contexte",
-                "evaluation",
-                "candidature",
-                "taches_table",
-            ]:
-                if sec in sections:
-                    section_items.append((sec, sections.get(sec)))
-
-            # "taches" : sections["taches"] (string) OU structured["taches"] (list)
-            if "taches" in sections:
-                section_items.append(("taches", sections.get("taches")))
-            elif structured.get("taches") is not None:
-                section_items.append(("taches", structured.get("taches")))
-
-        # score each block
-        for sec, content in section_items:
-            if not content:
+        for r in rows:
+            r = dict(r)
+            if not _contains_all_filters(r, filters):
                 continue
 
-            if isinstance(content, list):
-                content_text = "\n- " + "\n- ".join(str(x) for x in content[:40])
+            scanned += 1
+            bucket = r["processed_bucket"]
+            prefix = r["processed_prefix"]
+            structured_key = f"{prefix}structured/tdr_structured.json"
+
+            try:
+                with span_step("search.fallback.load_structured", bucket=bucket, key=structured_key):
+                    raw = download_text(bucket, structured_key)
+                    structured = json.loads(raw)
+            except Exception:
+                continue
+
+            doc_type = (structured.get("doc_type") or r.get("doc_type") or "unknown")
+            sections = structured.get("sections") or {}
+            metadata = structured.get("metadata") or {}
+
+            wanted_section = (filters.get("section") or "").strip()
+            section_items: List[Tuple[str, Any]] = []
+
+            if wanted_section:
+                content = sections.get(wanted_section)
+                if (content is None or content == "") and wanted_section == "taches":
+                    content = structured.get("taches")
+                section_items = [(wanted_section, content)]
             else:
-                content_text = str(content)
+                for sec in [
+                    "mission",
+                    "livrables",
+                    "planning",
+                    "profil",
+                    "contexte",
+                    "evaluation",
+                    "candidature",
+                    "taches_table",
+                ]:
+                    if sec in sections:
+                        section_items.append((sec, sections.get(sec)))
 
-            sc = _keyword_score(q_tokens, content_text)
-            if sc <= 0:
-                continue
+                if "taches" in sections:
+                    section_items.append(("taches", sections.get("taches")))
+                elif structured.get("taches") is not None:
+                    section_items.append(("taches", structured.get("taches")))
 
-            candidates.append(
-                {
-                    "score": float(sc),
-                    "score_final": float(sc),
-                    "doc_id": structured.get("doc_id") or r["id"],
-                    "doc_type": doc_type,
-                    "section": sec,
-                    "chunk_index": None,
-                    "text": content_text[:2000],
-                    "metadata": metadata,
-                }
-            )
+            for sec, content in section_items:
+                if not content:
+                    continue
 
-    candidates.sort(key=lambda x: float(x.get("score_final") or 0.0), reverse=True)
-    top_items = candidates[:top_k]
+                if isinstance(content, list):
+                    content_text = "\n- " + "\n- ".join(str(x) for x in content[:40])
+                else:
+                    content_text = str(content)
 
-    # group fallback results too (same output shape)
-    per_doc_snippets = int(getattr(settings, "per_doc_snippets", 3)) if hasattr(settings, "per_doc_snippets") else 3
-    grouped = _group_results_by_doc(top_items, query=query, per_doc_snippets=per_doc_snippets)
+                sc = _keyword_score(q_tokens, content_text)
+                if sc <= 0:
+                    continue
 
-    return {
-        "mode": "fallback_lexical",
-        "query": query,
-        "top_k": top_k,
-        "filters": filters,
-        "qdrant_error": qdrant_error,
-        "results": grouped,
-        "note": f"Fallback limited to last {MAX_DOCS} docs for performance.",
-    }
+                candidates.append(
+                    {
+                        "score": float(sc),
+                        "score_final": float(sc),
+                        "doc_id": structured.get("doc_id") or r["id"],
+                        "doc_type": doc_type,
+                        "section": sec,
+                        "chunk_index": None,
+                        "text": content_text[:2000],
+                        "metadata": metadata,
+                    }
+                )
+
+        candidates.sort(key=lambda x: float(x.get("score_final") or 0.0), reverse=True)
+        top_items = candidates[:top_k]
+
+        per_doc_snippets = int(getattr(settings, "per_doc_snippets", 3)) if hasattr(settings, "per_doc_snippets") else 3
+        grouped = _group_results_by_doc(top_items, query=query, per_doc_snippets=per_doc_snippets)
+
+        span.set_attribute("fallback.docs_scanned", scanned)
+        span.set_attribute("fallback.candidates", len(candidates))
+        span.set_attribute("fallback.returned_docs", len(grouped))
+
+        return {
+            "mode": "fallback_lexical",
+            "query": query,
+            "top_k": top_k,
+            "filters": filters,
+            "qdrant_error": qdrant_error,
+            "results": grouped,
+            "note": f"Fallback limited to last {MAX_DOCS} docs for performance.",
+        }

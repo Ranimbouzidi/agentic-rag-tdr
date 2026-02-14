@@ -1,15 +1,18 @@
 from fastapi import APIRouter, HTTPException
 import sqlalchemy as sa
+import time
 
 from app.services.db_service import engine, documents
 from app.services.minio_service import download_text, object_exists
 from app.services.structuring_process_service import structure_document
+from app.services.metrics_service import PIPELINE_STEP_TOTAL, PIPELINE_STEP_DURATION
 
 router = APIRouter(prefix="/structure", tags=["structuring"])
 
 
 @router.post("/{doc_id}")
 def structure(doc_id: str):
+    t0 = time.time()
     try:
         # 1) Get processed bucket/prefix from DB
         with engine.begin() as conn:
@@ -50,9 +53,9 @@ def structure(doc_id: str):
             try:
                 extracted_markdown = download_text(processed_bucket, md_key)
             except Exception:
-                extracted_markdown = None  # on n'échoue pas pour ça
+                extracted_markdown = None
 
-        # 4) Structure (TXT + optional Markdown tables)
+        # 4) Structure
         out_key = structure_document(
             doc_id=doc_id,
             extracted_text=extracted_text,
@@ -60,6 +63,9 @@ def structure(doc_id: str):
             processed_prefix=processed_prefix,
             processed_bucket=processed_bucket,
         )
+
+        PIPELINE_STEP_TOTAL.labels(step="structure", result="success").inc()
+        PIPELINE_STEP_DURATION.labels(step="structure", result="success").observe(time.time() - t0)
 
         return {
             "doc_id": doc_id,
@@ -72,4 +78,6 @@ def structure(doc_id: str):
         }
 
     except Exception as e:
+        PIPELINE_STEP_TOTAL.labels(step="structure", result="error").inc()
+        PIPELINE_STEP_DURATION.labels(step="structure", result="error").observe(time.time() - t0)
         raise HTTPException(status_code=400, detail=str(e))
